@@ -1,6 +1,7 @@
 package com.example.mediaget
 
 import android.webkit.CookieManager
+import android.webkit.WebChromeClient
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.activity.compose.BackHandler
@@ -53,6 +54,17 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+
+/**
+ * A stock modern-Chrome-on-Android UA string. Sites use the UA to detect
+ * "in-app browsers" (WebViews embedded inside other apps) and deliberately
+ * cripple them — this makes MediaGet's browser present as a normal phone
+ * browser instead, which is what fixes TikTok/X's blocked scrolling and
+ * "open in app" nags.
+ */
+private const val MOBILE_CHROME_USER_AGENT =
+    "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 " +
+        "(KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36"
 
 private fun iconFor(site: SnsSite): ImageVector = when (site) {
     SnsSite.INSTAGRAM -> Icons.Filled.PhotoCamera
@@ -113,12 +125,46 @@ fun BrowserScreen(viewModel: BrowserViewModel) {
                         WebView(ctx).apply {
                             settings.javaScriptEnabled = true
                             settings.domStorageEnabled = true
+                            settings.setSupportMultipleWindows(true)
+                            settings.javaScriptCanOpenWindowsAutomatically = true
+                            // TikTok/X/Threads detect the default WebView UA as an
+                            // "in-app browser" and respond by disabling scrolling,
+                            // gating features, or nagging to open their own app.
+                            // Presenting as a normal mobile Chrome fixes that.
+                            settings.userAgentString = MOBILE_CHROME_USER_AGENT
                             CookieManager.getInstance().setAcceptCookie(true)
                             CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
                             webViewClient = object : WebViewClient() {
                                 override fun onPageFinished(view: WebView?, url: String?) {
                                     super.onPageFinished(view, url)
                                     if (url != null) viewModel.onPageUrlChanged(url)
+                                }
+                            }
+                            // Login flows (Google/Apple sign-in popups, etc.) often open
+                            // via window.open() / target="_blank". A plain WebView drops
+                            // those silently, so route the popup's URL back into this
+                            // same WebView instead of losing it.
+                            webChromeClient = object : WebChromeClient() {
+                                override fun onCreateWindow(
+                                    view: WebView,
+                                    isDialog: Boolean,
+                                    isUserGesture: Boolean,
+                                    resultMsg: android.os.Message
+                                ): Boolean {
+                                    val popupWebView = WebView(view.context)
+                                    popupWebView.webViewClient = object : WebViewClient() {
+                                        override fun shouldOverrideUrlLoading(
+                                            popupView: WebView,
+                                            request: android.webkit.WebResourceRequest
+                                        ): Boolean {
+                                            view.loadUrl(request.url.toString())
+                                            return true
+                                        }
+                                    }
+                                    val transport = resultMsg.obj as WebView.WebViewTransport
+                                    transport.webView = popupWebView
+                                    resultMsg.sendToTarget()
+                                    return true
                                 }
                             }
                             loadUrl(site.homeUrl)
