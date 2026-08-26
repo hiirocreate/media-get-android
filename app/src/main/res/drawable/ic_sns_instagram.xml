@@ -1,0 +1,20 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <!-- rounded square frame -->
+    <path
+        android:strokeColor="#C1396B"
+        android:strokeWidth="2"
+        android:pathData="M8,2 H16 A6,6 0 0 1 22,8 V16 A6,6 0 0 1 16,22 H8 A6,6 0 0 1 2,16 V8 A6,6 0 0 1 8,2 Z" />
+    <!-- lens -->
+    <path
+        android:strokeColor="#C1396B"
+        android:strokeWidth="2"
+        android:pathData="M7,12 A5,5 0 1,0 17,12 A5,5 0 1,0 7,12 Z" />
+    <!-- flash dot -->
+    <path
+        android:fillColor="#C1396B"
+        android:pathData="M16.2,6.5 A1.3,1.3 0 1,0 18.8,6.5 A1.3,1.3 0 1,0 16.2,6.5 Z" />
+</vector>
