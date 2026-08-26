@@ -5,6 +5,7 @@ import android.webkit.WebChromeClient
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -21,16 +22,12 @@ import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.AlternateEmail
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.GetApp
-import androidx.compose.material.icons.filled.Forum
 import androidx.compose.material.icons.filled.Home
-import androidx.compose.material.icons.filled.MusicNote
-import androidx.compose.material.icons.filled.PhotoCamera
-import androidx.compose.material.icons.filled.PlayCircleFilled
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -52,10 +49,12 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 
 /**
@@ -125,12 +124,35 @@ private const val DESKTOP_LAYOUT_FIX_JS = """
 })();
 """
 
-private fun iconFor(site: SnsSite): ImageVector = when (site) {
-    SnsSite.INSTAGRAM -> Icons.Filled.PhotoCamera
-    SnsSite.TIKTOK -> Icons.Filled.MusicNote
-    SnsSite.YOUTUBE -> Icons.Filled.PlayCircleFilled
-    SnsSite.X -> Icons.Filled.AlternateEmail
-    SnsSite.THREADS -> Icons.Filled.Forum
+private fun drawableFor(site: SnsSite): Int = when (site) {
+    SnsSite.INSTAGRAM -> R.drawable.ic_sns_instagram
+    SnsSite.TIKTOK -> R.drawable.ic_sns_tiktok
+    SnsSite.YOUTUBE -> R.drawable.ic_sns_youtube
+    SnsSite.X, SnsSite.THREADS -> 0 // rendered as text glyphs instead, see SnsGlyph()
+}
+
+/**
+ * X and Threads' actual marks are just a bold letterform ("X" / a stylized
+ * "@"), so those two are drawn as plain text — simpler and always crisp at
+ * any size. Instagram/TikTok/YouTube get a small custom vector icon instead
+ * of a generic Material icon so they're recognizable at a glance.
+ */
+@Composable
+private fun SnsGlyph(site: SnsSite, size: androidx.compose.ui.unit.Dp, modifier: Modifier = Modifier) {
+    when (site) {
+        SnsSite.X -> Box(modifier = modifier.size(size), contentAlignment = Alignment.Center) {
+            Text("X", fontSize = (size.value * 0.75f).sp, fontWeight = FontWeight.Black)
+        }
+        SnsSite.THREADS -> Box(modifier = modifier.size(size), contentAlignment = Alignment.Center) {
+            Text("@", fontSize = (size.value * 0.85f).sp, fontWeight = FontWeight.Black)
+        }
+        else -> Icon(
+            painter = painterResource(id = drawableFor(site)),
+            contentDescription = site.displayName,
+            modifier = modifier.size(size),
+            tint = androidx.compose.ui.graphics.Color.Unspecified
+        )
+    }
 }
 
 @Composable
@@ -312,7 +334,7 @@ private fun BrowserHome(onSelect: (SnsSite) -> Unit) {
                         horizontalAlignment = Alignment.CenterHorizontally
                     ) {
                         IconButton(onClick = { onSelect(site) }) {
-                            Icon(iconFor(site), contentDescription = site.displayName, modifier = Modifier.size(36.dp))
+                            SnsGlyph(site, size = 36.dp)
                         }
                         Text(site.displayName)
                     }
@@ -331,12 +353,22 @@ private fun BrowserControlBar(current: SnsSite, onSelect: (SnsSite) -> Unit) {
         horizontalArrangement = Arrangement.SpaceEvenly
     ) {
         SnsSite.values().forEach { site ->
+            val isActive = site == current
             IconButton(onClick = { onSelect(site) }) {
-                Icon(
-                    iconFor(site),
-                    contentDescription = site.displayName,
-                    tint = if (site == current) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
-                )
+                Box(
+                    modifier = Modifier
+                        .size(36.dp)
+                        .then(
+                            if (isActive) {
+                                Modifier.background(MaterialTheme.colorScheme.primaryContainer, CircleShape)
+                            } else {
+                                Modifier
+                            }
+                        ),
+                    contentAlignment = Alignment.Center
+                ) {
+                    SnsGlyph(site, size = 22.dp)
+                }
             }
         }
     }
