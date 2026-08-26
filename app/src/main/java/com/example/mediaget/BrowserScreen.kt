@@ -85,12 +85,45 @@ private fun WebView.applyDisplayMode(desktopMode: Boolean): Boolean {
     val desiredUa = if (desktopMode) DESKTOP_CHROME_USER_AGENT else MOBILE_CHROME_USER_AGENT
     val changed = settings.userAgentString != desiredUa
     settings.userAgentString = desiredUa
-    // "Overview mode" is what makes a desktop-width page shrink to fit the
-    // screen instead of showing one tiny top-left corner of it.
-    settings.useWideViewPort = desktopMode
-    settings.loadWithOverviewMode = desktopMode
+    // Required for WebView to honor any <meta name="viewport"> tag at all —
+    // including the one DESKTOP_LAYOUT_FIX_JS injects below.
+    settings.useWideViewPort = true
+    // "Overview mode" shrinks a desktop-width page to fit the screen as a
+    // fallback while the page is loading, before the JS fix below re-flows it
+    // properly; harmless to leave on for the mobile UA too.
+    settings.loadWithOverviewMode = true
     return changed
 }
+
+/**
+ * Desktop sites are built for a ~980px-wide layout and often ship no (or a
+ * non-mobile) viewport tag. Rather than just shrinking that whole wide page
+ * to fit the phone screen — which is what "PC表示" alone gives you, and why
+ * everything ends up tiny until you pinch-zoom — this forces the page to
+ * actually reflow at the phone's real width, the same way it would if a
+ * normal mobile browser had asked for it.
+ */
+private const val DESKTOP_LAYOUT_FIX_JS = """
+(function() {
+  try {
+    var meta = document.querySelector('meta[name="viewport"]');
+    if (!meta) {
+      meta = document.createElement('meta');
+      meta.setAttribute('name', 'viewport');
+      document.head.appendChild(meta);
+    }
+    meta.setAttribute('content', 'width=device-width, initial-scale=1, maximum-scale=5');
+
+    var style = document.getElementById('mediaget-layout-fix');
+    if (!style) {
+      style = document.createElement('style');
+      style.id = 'mediaget-layout-fix';
+      document.head.appendChild(style);
+    }
+    style.textContent = 'html, body { max-width: 100% !important; overflow-x: hidden !important; }';
+  } catch (e) {}
+})();
+"""
 
 private fun iconFor(site: SnsSite): ImageVector = when (site) {
     SnsSite.INSTAGRAM -> Icons.Filled.PhotoCamera
@@ -161,6 +194,9 @@ fun BrowserScreen(viewModel: BrowserViewModel) {
                                     override fun onPageFinished(view: WebView?, url: String?) {
                                         super.onPageFinished(view, url)
                                         if (url != null) viewModel.onPageUrlChanged(url)
+                                        if (desktopMode) {
+                                            view?.evaluateJavascript(DESKTOP_LAYOUT_FIX_JS, null)
+                                        }
                                     }
                                 }
                                 // Login flows (Google/Apple sign-in popups, etc.) often open
