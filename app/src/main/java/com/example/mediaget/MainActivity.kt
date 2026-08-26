@@ -23,6 +23,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Language
 import androidx.compose.material.icons.filled.Link
+import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.Checkbox
@@ -56,6 +57,7 @@ class MainActivity : ComponentActivity() {
 
     private val viewModel: MainViewModel by viewModels()
     private val browserViewModel: BrowserViewModel by viewModels()
+    private val libraryViewModel: MediaLibraryViewModel by viewModels()
 
     private val notificationPermissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { /* no-op either way */ }
@@ -71,6 +73,7 @@ class MainActivity : ComponentActivity() {
                 MediaGetApp(
                     mainViewModel = viewModel,
                     browserViewModel = browserViewModel,
+                    libraryViewModel = libraryViewModel,
                     initialUrl = sharedUrl
                 )
             }
@@ -104,11 +107,17 @@ class MainActivity : ComponentActivity() {
 
 private enum class AppTab(val label: String) {
     LINK("リンクで取得"),
-    BROWSER("ブラウザ")
+    BROWSER("ブラウザ"),
+    LIBRARY("ライブラリ")
 }
 
 @Composable
-fun MediaGetApp(mainViewModel: MainViewModel, browserViewModel: BrowserViewModel, initialUrl: String) {
+fun MediaGetApp(
+    mainViewModel: MainViewModel,
+    browserViewModel: BrowserViewModel,
+    libraryViewModel: MediaLibraryViewModel,
+    initialUrl: String
+) {
     var tab by rememberSaveable { mutableStateOf(AppTab.LINK) }
 
     Scaffold(
@@ -126,6 +135,12 @@ fun MediaGetApp(mainViewModel: MainViewModel, browserViewModel: BrowserViewModel
                     icon = { Icon(Icons.Filled.Language, contentDescription = null) },
                     label = { Text(AppTab.BROWSER.label) }
                 )
+                NavigationBarItem(
+                    selected = tab == AppTab.LIBRARY,
+                    onClick = { tab = AppTab.LIBRARY },
+                    icon = { Icon(Icons.Filled.PhotoLibrary, contentDescription = null) },
+                    label = { Text(AppTab.LIBRARY.label) }
+                )
             }
         }
     ) { padding ->
@@ -133,6 +148,7 @@ fun MediaGetApp(mainViewModel: MainViewModel, browserViewModel: BrowserViewModel
             when (tab) {
                 AppTab.LINK -> DownloadScreen(viewModel = mainViewModel, initialUrl = initialUrl)
                 AppTab.BROWSER -> BrowserScreen(viewModel = browserViewModel)
+                AppTab.LIBRARY -> MediaLibraryScreen(viewModel = libraryViewModel)
             }
         }
     }
