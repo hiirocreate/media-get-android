@@ -36,6 +36,8 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ExtendedFloatingActionButton
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -46,6 +48,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -66,6 +69,29 @@ private const val MOBILE_CHROME_USER_AGENT =
     "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 " +
         "(KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36"
 
+/**
+ * A stock desktop-Chrome-on-Windows UA string. Instagram/TikTok's login and
+ * "open in app" gating mostly targets the *mobile* web experience — asking
+ * for the desktop site (same trick as "Request Desktop Site" in every mobile
+ * browser) sidesteps a lot of it, at the cost of a desktop-width layout that
+ * needs pinch-zoom/pan to use comfortably on a phone screen.
+ */
+private const val DESKTOP_CHROME_USER_AGENT =
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
+        "(KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
+
+/** Applies the mobile/desktop presentation to this WebView. Returns true if anything changed. */
+private fun WebView.applyDisplayMode(desktopMode: Boolean): Boolean {
+    val desiredUa = if (desktopMode) DESKTOP_CHROME_USER_AGENT else MOBILE_CHROME_USER_AGENT
+    val changed = settings.userAgentString != desiredUa
+    settings.userAgentString = desiredUa
+    // "Overview mode" is what makes a desktop-width page shrink to fit the
+    // screen instead of showing one tiny top-left corner of it.
+    settings.useWideViewPort = desktopMode
+    settings.loadWithOverviewMode = desktopMode
+    return changed
+}
+
 private fun iconFor(site: SnsSite): ImageVector = when (site) {
     SnsSite.INSTAGRAM -> Icons.Filled.PhotoCamera
     SnsSite.TIKTOK -> Icons.Filled.MusicNote
@@ -79,6 +105,7 @@ fun BrowserScreen(viewModel: BrowserViewModel) {
     val state by viewModel.state.collectAsState()
     val context = LocalContext.current
     var webViewRef by remember { mutableStateOf<WebView?>(null) }
+    var desktopMode by rememberSaveable { mutableStateOf(false) }
 
     BackHandler(enabled = state.currentSite != null) {
         val wv = webViewRef
@@ -95,7 +122,7 @@ fun BrowserScreen(viewModel: BrowserViewModel) {
                     verticalAlignment = Alignment.CenterVertically,
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 8.dp, vertical = 4.dp)
+                        .padding(horizontal = 4.dp, vertical = 4.dp)
                 ) {
                     IconButton(onClick = { viewModel.goHome() }) {
                         Icon(Icons.Filled.Home, contentDescription = "ホーム")
@@ -109,69 +136,94 @@ fun BrowserScreen(viewModel: BrowserViewModel) {
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
-                    Button(onClick = { viewModel.requestDownload(context) }, enabled = !state.isProbing) {
-                        if (state.isProbing) {
-                            CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
-                        } else {
-                            Icon(Icons.Filled.GetApp, contentDescription = null, modifier = Modifier.size(18.dp))
-                            Text(" この投稿を保存")
-                        }
-                    }
+                    FilterChip(
+                        selected = desktopMode,
+                        onClick = { desktopMode = !desktopMode },
+                        label = { Text("PC表示") }
+                    )
                 }
 
-                AndroidView(
-                    modifier = Modifier.weight(1f),
-                    factory = { ctx ->
-                        WebView(ctx).apply {
-                            settings.javaScriptEnabled = true
-                            settings.domStorageEnabled = true
-                            settings.setSupportMultipleWindows(true)
-                            settings.javaScriptCanOpenWindowsAutomatically = true
-                            // TikTok/X/Threads detect the default WebView UA as an
-                            // "in-app browser" and respond by disabling scrolling,
-                            // gating features, or nagging to open their own app.
-                            // Presenting as a normal mobile Chrome fixes that.
-                            settings.userAgentString = MOBILE_CHROME_USER_AGENT
-                            CookieManager.getInstance().setAcceptCookie(true)
-                            CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
-                            webViewClient = object : WebViewClient() {
-                                override fun onPageFinished(view: WebView?, url: String?) {
-                                    super.onPageFinished(view, url)
-                                    if (url != null) viewModel.onPageUrlChanged(url)
-                                }
-                            }
-                            // Login flows (Google/Apple sign-in popups, etc.) often open
-                            // via window.open() / target="_blank". A plain WebView drops
-                            // those silently, so route the popup's URL back into this
-                            // same WebView instead of losing it.
-                            webChromeClient = object : WebChromeClient() {
-                                override fun onCreateWindow(
-                                    view: WebView,
-                                    isDialog: Boolean,
-                                    isUserGesture: Boolean,
-                                    resultMsg: android.os.Message
-                                ): Boolean {
-                                    val popupWebView = WebView(view.context)
-                                    popupWebView.webViewClient = object : WebViewClient() {
-                                        override fun shouldOverrideUrlLoading(
-                                            popupView: WebView,
-                                            request: android.webkit.WebResourceRequest
-                                        ): Boolean {
-                                            view.loadUrl(request.url.toString())
-                                            return true
-                                        }
+                Box(modifier = Modifier.weight(1f)) {
+                    AndroidView(
+                        modifier = Modifier.fillMaxSize(),
+                        factory = { ctx ->
+                            WebView(ctx).apply {
+                                settings.javaScriptEnabled = true
+                                settings.domStorageEnabled = true
+                                settings.setSupportMultipleWindows(true)
+                                settings.javaScriptCanOpenWindowsAutomatically = true
+                                settings.setSupportZoom(true)
+                                settings.builtInZoomControls = true
+                                settings.displayZoomControls = false
+                                CookieManager.getInstance().setAcceptCookie(true)
+                                CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
+                                webViewClient = object : WebViewClient() {
+                                    override fun onPageFinished(view: WebView?, url: String?) {
+                                        super.onPageFinished(view, url)
+                                        if (url != null) viewModel.onPageUrlChanged(url)
                                     }
-                                    val transport = resultMsg.obj as WebView.WebViewTransport
-                                    transport.webView = popupWebView
-                                    resultMsg.sendToTarget()
-                                    return true
                                 }
+                                // Login flows (Google/Apple sign-in popups, etc.) often open
+                                // via window.open() / target="_blank". A plain WebView drops
+                                // those silently, so route the popup's URL back into this
+                                // same WebView instead of losing it.
+                                webChromeClient = object : WebChromeClient() {
+                                    override fun onCreateWindow(
+                                        view: WebView,
+                                        isDialog: Boolean,
+                                        isUserGesture: Boolean,
+                                        resultMsg: android.os.Message
+                                    ): Boolean {
+                                        val popupWebView = WebView(view.context)
+                                        popupWebView.webViewClient = object : WebViewClient() {
+                                            override fun shouldOverrideUrlLoading(
+                                                popupView: WebView,
+                                                request: android.webkit.WebResourceRequest
+                                            ): Boolean {
+                                                view.loadUrl(request.url.toString())
+                                                return true
+                                            }
+                                        }
+                                        val transport = resultMsg.obj as WebView.WebViewTransport
+                                        transport.webView = popupWebView
+                                        resultMsg.sendToTarget()
+                                        return true
+                                    }
+                                }
+                                // TikTok/X/Threads detect the default WebView UA as an
+                                // "in-app browser" and respond by disabling scrolling,
+                                // gating features, or nagging to open their own app;
+                                // Instagram/TikTok's login also often refuses to render
+                                // at all in mobile-web mode. applyDisplayMode() picks
+                                // the mobile- or desktop-Chrome UA per the toggle above.
+                                applyDisplayMode(desktopMode)
+                                loadUrl(site.homeUrl)
+                                webViewRef = this
                             }
-                            loadUrl(site.homeUrl)
-                            webViewRef = this
+                        },
+                        update = { webView ->
+                            webViewRef = webView
+                            if (webView.applyDisplayMode(desktopMode)) {
+                                webView.reload()
+                            }
                         }
-                    }
-                )
+                    )
+
+                    ExtendedFloatingActionButton(
+                        onClick = { viewModel.requestDownload(context) },
+                        modifier = Modifier
+                            .align(Alignment.BottomEnd)
+                            .padding(16.dp),
+                        icon = {
+                            if (state.isProbing) {
+                                CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+                            } else {
+                                Icon(Icons.Filled.GetApp, contentDescription = null)
+                            }
+                        },
+                        text = { Text("この投稿を保存") }
+                    )
+                }
 
                 BrowserControlBar(
                     current = site,
