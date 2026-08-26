@@ -140,10 +140,11 @@ class DownloadService : Service() {
             tmpDir.deleteRecursively()
 
             if (savedUris.isEmpty()) {
+                val msg = "保存できるファイルが見つかりませんでした"
                 DownloadRepository.update(job.id) {
-                    it.copy(status = DownloadStatus.FAILED, errorMessage = "保存できるファイルが見つかりませんでした")
+                    it.copy(status = DownloadStatus.FAILED, errorMessage = msg)
                 }
-                notifyResult(job.id, success = false, job.url)
+                notifyResult(job.id, success = false, job.url, msg)
             } else {
                 DownloadRepository.update(job.id) {
                     it.copy(
@@ -157,16 +158,18 @@ class DownloadService : Service() {
             }
         } catch (e: YoutubeDLException) {
             tmpDir.deleteRecursively()
+            val msg = e.message ?: "ダウンロードに失敗しました"
             DownloadRepository.update(job.id) {
-                it.copy(status = DownloadStatus.FAILED, errorMessage = e.message ?: "ダウンロードに失敗しました")
+                it.copy(status = DownloadStatus.FAILED, errorMessage = msg)
             }
-            notifyResult(job.id, success = false, job.url)
+            notifyResult(job.id, success = false, job.url, msg)
         } catch (e: Exception) {
             tmpDir.deleteRecursively()
+            val msg = e.message ?: "予期しないエラーが発生しました"
             DownloadRepository.update(job.id) {
-                it.copy(status = DownloadStatus.FAILED, errorMessage = e.message ?: "予期しないエラーが発生しました")
+                it.copy(status = DownloadStatus.FAILED, errorMessage = msg)
             }
-            notifyResult(job.id, success = false, job.url)
+            notifyResult(job.id, success = false, job.url, msg)
         }
     }
 
@@ -187,10 +190,12 @@ class DownloadService : Service() {
             ?.notify(SUMMARY_NOTIFICATION_ID, notification)
     }
 
-    private fun notifyResult(jobId: String, success: Boolean, url: String) {
+    private fun notifyResult(jobId: String, success: Boolean, url: String, detail: String? = null) {
+        val bodyText = if (detail.isNullOrBlank()) url else "$url\n$detail"
         val notification = NotificationCompat.Builder(this, MediaGetApp.DOWNLOAD_CHANNEL_ID)
             .setContentTitle(if (success) "保存しました" else "失敗しました")
             .setContentText(url)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(bodyText))
             .setSmallIcon(
                 if (success) android.R.drawable.stat_sys_download_done
                 else android.R.drawable.stat_notify_error
