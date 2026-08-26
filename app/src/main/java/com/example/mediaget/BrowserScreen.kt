@@ -111,7 +111,12 @@ private const val DESKTOP_LAYOUT_FIX_JS = """
       meta.setAttribute('name', 'viewport');
       document.head.appendChild(meta);
     }
-    meta.setAttribute('content', 'width=device-width, initial-scale=1, maximum-scale=5');
+    // maximum-scale=1 / user-scalable=no here (only in "PC表示" mode) stops
+    // Android WebView's own "auto-zoom into the focused input" behavior,
+    // which is what made the screen jump/scroll while typing into a login
+    // field on a desktop-layout page — the page itself never asked to zoom,
+    // WebView was doing it on every focus/re-render.
+    meta.setAttribute('content', 'width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no');
 
     var style = document.getElementById('mediaget-layout-fix');
     if (!style) {
@@ -119,7 +124,7 @@ private const val DESKTOP_LAYOUT_FIX_JS = """
       style.id = 'mediaget-layout-fix';
       document.head.appendChild(style);
     }
-    style.textContent = 'html, body { max-width: 100% !important; overflow-x: hidden !important; }';
+    style.textContent = 'html, body { max-width: 100% !important; overflow-x: hidden !important; } input, textarea, select { font-size: 16px !important; }';
   } catch (e) {}
 })();
 """
