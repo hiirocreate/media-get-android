@@ -1,433 +1,210 @@
 package com.example.mediaget
 
-import android.webkit.CookieManager
-import android.webkit.WebChromeClient
-import android.webkit.WebView
-import android.webkit.WebViewClient
-import androidx.activity.compose.BackHandler
-import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.PaddingValues
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.aspectRatio
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.heightIn
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.lazy.grid.GridCells
-import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
-import androidx.compose.foundation.lazy.grid.items
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.ArrowBack
-import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.GetApp
-import androidx.compose.material.icons.filled.Home
-import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
-import androidx.compose.material3.Card
-import androidx.compose.material3.Checkbox
-import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.ExtendedFloatingActionButton
-import androidx.compose.material3.FilterChip
-import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.saveable.rememberSaveable
-import androidx.compose.runtime.setValue
-import androidx.compose.ui.Alignment
-import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.res.painterResource
-import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
-import androidx.compose.ui.viewinterop.AndroidView
+import android.content.Context
+import android.widget.Toast
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.launch
 
-/**
- * A stock modern-Chrome-on-Android UA string. Sites use the UA to detect
- * "in-app browsers" (WebViews embedded inside other apps) and deliberately
- * cripple them — this makes MediaGet's browser present as a normal phone
- * browser instead, which is what fixes TikTok/X's blocked scrolling and
- * "open in app" nags.
- */
-private const val MOBILE_CHROME_USER_AGENT =
-    "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 " +
-        "(KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36"
-
-/**
- * A stock desktop-Chrome-on-Windows UA string. Instagram/TikTok's login and
- * "open in app" gating mostly targets the *mobile* web experience — asking
- * for the desktop site (same trick as "Request Desktop Site" in every mobile
- * browser) sidesteps a lot of it, at the cost of a desktop-width layout that
- * needs pinch-zoom/pan to use comfortably on a phone screen.
- */
-private const val DESKTOP_CHROME_USER_AGENT =
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
-        "(KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
-
-/** Applies the mobile/desktop presentation to this WebView. Returns true if anything changed. */
-private fun WebView.applyDisplayMode(desktopMode: Boolean): Boolean {
-    val desiredUa = if (desktopMode) DESKTOP_CHROME_USER_AGENT else MOBILE_CHROME_USER_AGENT
-    val changed = settings.userAgentString != desiredUa
-    settings.userAgentString = desiredUa
-    // Required for WebView to honor any <meta name="viewport"> tag at all —
-    // including the one DESKTOP_LAYOUT_FIX_JS injects below.
-    settings.useWideViewPort = true
-    // "Overview mode" shrinks a desktop-width page to fit the screen as a
-    // fallback while the page is loading, before the JS fix below re-flows it
-    // properly; harmless to leave on for the mobile UA too.
-    settings.loadWithOverviewMode = true
-    return changed
+enum class SnsSite(val displayName: String, val homeUrl: String) {
+    INSTAGRAM("Instagram", "https://www.instagram.com/"),
+    TIKTOK("TikTok", "https://www.tiktok.com/"),
+    YOUTUBE("YouTube", "https://www.youtube.com/"),
+    X("X", "https://x.com/"),
+    THREADS("Threads", "https://www.threads.com/")
 }
 
-/**
- * Desktop sites are built for a ~980px-wide layout and often ship no (or a
- * non-mobile) viewport tag. Rather than just shrinking that whole wide page
- * to fit the phone screen — which is what "PC表示" alone gives you, and why
- * everything ends up tiny until you pinch-zoom — this forces the page to
- * actually reflow at the phone's real width, the same way it would if a
- * normal mobile browser had asked for it.
- */
-private const val DESKTOP_LAYOUT_FIX_JS = """
-(function() {
-  try {
-    var meta = document.querySelector('meta[name="viewport"]');
-    if (!meta) {
-      meta = document.createElement('meta');
-      meta.setAttribute('name', 'viewport');
-      document.head.appendChild(meta);
+data class BrowserUiState(
+    val currentSite: SnsSite? = null,
+    val currentUrl: String = "",
+    val isProbing: Boolean = false,
+    val pickerEntries: List<MediaEntry>? = null,
+    val pickerSelected: Set<Int> = emptySet(),
+    val pickerSourceUrl: String = "",
+    // "直近3件から選ぶ" — a fixed-size (see MediaProbe.RECENT_POSTS_LIMIT) list
+    // of an account's newest posts to hand-pick from, never the full history.
+    val recentPosts: List<ProfilePostCandidate>? = null,
+    val recentPostsSelected: Set<Int> = emptySet()
+)
+
+class BrowserViewModel : ViewModel() {
+
+    private val _state = MutableStateFlow(BrowserUiState())
+    val state: StateFlow<BrowserUiState> = _state
+
+    fun openSite(site: SnsSite) {
+        _state.update { it.copy(currentSite = site, currentUrl = site.homeUrl) }
     }
-    // maximum-scale=1 / user-scalable=no here (only in "PC表示" mode) stops
-    // Android WebView's own "auto-zoom into the focused input" behavior,
-    // which is what made the screen jump/scroll while typing into a login
-    // field on a desktop-layout page — the page itself never asked to zoom,
-    // WebView was doing it on every focus/re-render.
-    meta.setAttribute('content', 'width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no');
 
-    var style = document.getElementById('mediaget-layout-fix');
-    if (!style) {
-      style = document.createElement('style');
-      style.id = 'mediaget-layout-fix';
-      document.head.appendChild(style);
+    fun goHome() {
+        _state.update { it.copy(currentSite = null, currentUrl = "") }
     }
-    style.textContent = 'html, body { max-width: 100% !important; overflow-x: hidden !important; } input, textarea, select { font-size: 16px !important; }';
-  } catch (e) {}
-})();
-"""
 
-private fun drawableFor(site: SnsSite): Int = when (site) {
-    SnsSite.INSTAGRAM -> R.drawable.ic_sns_instagram
-    SnsSite.TIKTOK -> R.drawable.ic_sns_tiktok
-    SnsSite.YOUTUBE -> R.drawable.ic_sns_youtube
-    SnsSite.X, SnsSite.THREADS -> 0 // rendered as text glyphs instead, see SnsGlyph()
-}
+    fun onPageUrlChanged(url: String) {
+        _state.update { it.copy(currentUrl = url) }
+    }
 
-/**
- * X and Threads' actual marks are just a bold letterform ("X" / a stylized
- * "@"), so those two are drawn as plain text — simpler and always crisp at
- * any size. Instagram/TikTok/YouTube get a small custom vector icon instead
- * of a generic Material icon so they're recognizable at a glance.
- */
-@Composable
-private fun SnsGlyph(site: SnsSite, size: androidx.compose.ui.unit.Dp, modifier: Modifier = Modifier) {
-    when (site) {
-        SnsSite.X -> Box(modifier = modifier.size(size), contentAlignment = Alignment.Center) {
-            Text("X", fontSize = (size.value * 0.75f).sp, fontWeight = FontWeight.Black)
+    /** Called from the browser's "この投稿を保存" button, on a post/story page. */
+    fun requestDownload(context: Context) {
+        val url = _state.value.currentUrl
+        if (url.isBlank()) return
+
+        _state.update { it.copy(isProbing = true) }
+        viewModelScope.launch { probeAndPresent(context, url, "ダウンロードを開始しました") }
+    }
+
+    /**
+     * Called from the "最新の投稿を保存" button shown instead, when the WebView
+     * is sitting on a profile/account page rather than a specific post. This
+     * only ever resolves and downloads that account's single newest post —
+     * never the rest of their history — matching the same one-post-at-a-time
+     * rule as [requestDownload].
+     */
+    fun requestDownloadLatestPost(context: Context) {
+        val s = _state.value
+        val site = s.currentSite ?: return
+        val profileUrl = s.currentUrl
+        if (profileUrl.isBlank()) return
+
+        _state.update { it.copy(isProbing = true) }
+        viewModelScope.launch {
+            MediaProbe.resolveLatestPostUrl(site, profileUrl)
+                .onFailure { e ->
+                    _state.update { it.copy(isProbing = false) }
+                    Toast.makeText(context, "最新の投稿を特定できませんでした: ${e.message}", Toast.LENGTH_SHORT).show()
+                }
+                .onSuccess { postUrl ->
+                    probeAndPresent(context, postUrl, "最新の投稿のダウンロードを開始しました")
+                }
         }
-        SnsSite.THREADS -> Box(modifier = modifier.size(size), contentAlignment = Alignment.Center) {
-            Text("@", fontSize = (size.value * 0.85f).sp, fontWeight = FontWeight.Black)
+    }
+
+    /**
+     * Called from the "直近3件から選ぶ" button on a profile page. Lists only the
+     * account's newest handful of posts (hard-capped inside
+     * [MediaProbe.probeRecentPosts], not configurable from here) and shows
+     * them as a pick-list; confirming downloads only the chosen ones, in
+     * full — this never reads or downloads anything beyond that short list.
+     */
+    fun requestRecentPosts(context: Context) {
+        val s = _state.value
+        val site = s.currentSite ?: return
+        val profileUrl = s.currentUrl
+        if (profileUrl.isBlank()) return
+
+        _state.update { it.copy(isProbing = true) }
+        viewModelScope.launch {
+            MediaProbe.probeRecentPosts(site, profileUrl)
+                .onFailure { e ->
+                    _state.update { it.copy(isProbing = false) }
+                    Toast.makeText(context, "投稿一覧を取得できませんでした: ${e.message}", Toast.LENGTH_SHORT).show()
+                }
+                .onSuccess { candidates ->
+                    _state.update {
+                        it.copy(
+                            isProbing = false,
+                            recentPosts = candidates,
+                            recentPostsSelected = candidates.map { c -> c.index }.toSet()
+                        )
+                    }
+                }
         }
-        else -> Icon(
-            painter = painterResource(id = drawableFor(site)),
-            contentDescription = site.displayName,
-            modifier = modifier.size(size),
-            tint = androidx.compose.ui.graphics.Color.Unspecified
-        )
-    }
-}
-
-@Composable
-fun BrowserScreen(viewModel: BrowserViewModel) {
-    val state by viewModel.state.collectAsState()
-    val context = LocalContext.current
-    var webViewRef by remember { mutableStateOf<WebView?>(null) }
-    var desktopMode by rememberSaveable { mutableStateOf(false) }
-
-    BackHandler(enabled = state.currentSite != null) {
-        val wv = webViewRef
-        if (wv != null && wv.canGoBack()) wv.goBack() else viewModel.goHome()
     }
 
-    Box(modifier = Modifier.fillMaxSize()) {
-        val site = state.currentSite
-        if (site == null) {
-            BrowserHome(onSelect = { viewModel.openSite(it) })
+    fun toggleRecentPostSelected(index: Int) {
+        _state.update { s ->
+            val newSet = if (index in s.recentPostsSelected) s.recentPostsSelected - index else s.recentPostsSelected + index
+            s.copy(recentPostsSelected = newSet)
+        }
+    }
+
+    fun selectAllRecentPosts() {
+        _state.update { s -> s.copy(recentPostsSelected = s.recentPosts.orEmpty().map { it.index }.toSet()) }
+    }
+
+    fun clearRecentPostsSelection() {
+        _state.update { it.copy(recentPostsSelected = emptySet()) }
+    }
+
+    fun dismissRecentPosts() {
+        _state.update { it.copy(recentPosts = null, recentPostsSelected = emptySet()) }
+    }
+
+    fun confirmRecentPostsDownload(context: Context) {
+        val s = _state.value
+        val candidates = s.recentPosts ?: return
+        val chosen = candidates.filter { it.index in s.recentPostsSelected }
+        if (chosen.isEmpty()) return
+
+        // Each chosen post downloads in full (same as pasting its link directly
+        // into "リンクで取得") — no further per-post carousel sub-selection here,
+        // to keep this already-narrow picker simple.
+        chosen.forEach { candidate -> DownloadActions.submit(context, candidate.postUrl) }
+        Toast.makeText(context, "ダウンロードを開始しました（${chosen.size}件）", Toast.LENGTH_SHORT).show()
+        dismissRecentPosts()
+    }
+
+    private suspend fun probeAndPresent(context: Context, url: String, successMessage: String) {
+        when (val result = MediaProbe.probe(url)) {
+            is ProbeResult.Failure -> {
+                _state.update { it.copy(isProbing = false) }
+                Toast.makeText(context, "内容を確認できませんでした: ${result.message}", Toast.LENGTH_SHORT).show()
+            }
+            is ProbeResult.Success -> {
+                if (result.entries.size <= 1) {
+                    // Single item: nothing to choose from, just download it.
+                    DownloadActions.submit(context, url)
+                    _state.update { it.copy(isProbing = false) }
+                    Toast.makeText(context, successMessage, Toast.LENGTH_SHORT).show()
+                } else {
+                    _state.update {
+                        it.copy(
+                            isProbing = false,
+                            pickerEntries = result.entries,
+                            pickerSelected = result.entries.map { e -> e.index }.toSet(),
+                            pickerSourceUrl = url
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    fun toggleSelected(index: Int) {
+        _state.update { s ->
+            val newSet = if (index in s.pickerSelected) s.pickerSelected - index else s.pickerSelected + index
+            s.copy(pickerSelected = newSet)
+        }
+    }
+
+    fun selectAll() {
+        _state.update { s -> s.copy(pickerSelected = s.pickerEntries.orEmpty().map { it.index }.toSet()) }
+    }
+
+    fun clearSelection() {
+        _state.update { it.copy(pickerSelected = emptySet()) }
+    }
+
+    fun dismissPicker() {
+        _state.update { it.copy(pickerEntries = null, pickerSelected = emptySet(), pickerSourceUrl = "") }
+    }
+
+    fun confirmPickerDownload(context: Context) {
+        val s = _state.value
+        val entries = s.pickerEntries ?: return
+        if (s.pickerSelected.isEmpty()) return
+
+        val playlistItems = if (s.pickerSelected.size == entries.size) {
+            null // everything selected — no need to filter
         } else {
-            Column(modifier = Modifier.fillMaxSize()) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 4.dp, vertical = 4.dp)
-                ) {
-                    IconButton(onClick = { viewModel.goHome() }) {
-                        Icon(Icons.Filled.Home, contentDescription = "ホーム")
-                    }
-                    IconButton(onClick = { webViewRef?.let { if (it.canGoBack()) it.goBack() } }) {
-                        Icon(Icons.Filled.ArrowBack, contentDescription = "戻る")
-                    }
-                    Text(
-                        text = site.displayName,
-                        modifier = Modifier.weight(1f),
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                    FilterChip(
-                        selected = desktopMode,
-                        onClick = { desktopMode = !desktopMode },
-                        label = { Text("PC表示") }
-                    )
-                }
-
-                Box(modifier = Modifier.weight(1f)) {
-                    AndroidView(
-                        modifier = Modifier.fillMaxSize(),
-                        factory = { ctx ->
-                            WebView(ctx).apply {
-                                settings.javaScriptEnabled = true
-                                settings.domStorageEnabled = true
-                                settings.setSupportMultipleWindows(true)
-                                settings.javaScriptCanOpenWindowsAutomatically = true
-                                settings.setSupportZoom(true)
-                                settings.builtInZoomControls = true
-                                settings.displayZoomControls = false
-                                CookieManager.getInstance().setAcceptCookie(true)
-                                CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
-                                webViewClient = object : WebViewClient() {
-                                    override fun onPageFinished(view: WebView?, url: String?) {
-                                        super.onPageFinished(view, url)
-                                        if (url != null) viewModel.onPageUrlChanged(url)
-                                        if (desktopMode) {
-                                            view?.evaluateJavascript(DESKTOP_LAYOUT_FIX_JS, null)
-                                        }
-                                    }
-                                }
-                                // Login flows (Google/Apple sign-in popups, etc.) often open
-                                // via window.open() / target="_blank". A plain WebView drops
-                                // those silently, so route the popup's URL back into this
-                                // same WebView instead of losing it.
-                                webChromeClient = object : WebChromeClient() {
-                                    override fun onCreateWindow(
-                                        view: WebView,
-                                        isDialog: Boolean,
-                                        isUserGesture: Boolean,
-                                        resultMsg: android.os.Message
-                                    ): Boolean {
-                                        val popupWebView = WebView(view.context)
-                                        popupWebView.webViewClient = object : WebViewClient() {
-                                            override fun shouldOverrideUrlLoading(
-                                                popupView: WebView,
-                                                request: android.webkit.WebResourceRequest
-                                            ): Boolean {
-                                                view.loadUrl(request.url.toString())
-                                                return true
-                                            }
-                                        }
-                                        val transport = resultMsg.obj as WebView.WebViewTransport
-                                        transport.webView = popupWebView
-                                        resultMsg.sendToTarget()
-                                        return true
-                                    }
-                                }
-                                // TikTok/X/Threads detect the default WebView UA as an
-                                // "in-app browser" and respond by disabling scrolling,
-                                // gating features, or nagging to open their own app;
-                                // Instagram/TikTok's login also often refuses to render
-                                // at all in mobile-web mode. applyDisplayMode() picks
-                                // the mobile- or desktop-Chrome UA per the toggle above.
-                                applyDisplayMode(desktopMode)
-                                loadUrl(site.homeUrl)
-                                webViewRef = this
-                            }
-                        },
-                        update = { webView ->
-                            webViewRef = webView
-                            if (webView.applyDisplayMode(desktopMode)) {
-                                webView.reload()
-                            }
-                        }
-                    )
-
-                    ExtendedFloatingActionButton(
-                        onClick = { viewModel.requestDownload(context) },
-                        modifier = Modifier
-                            .align(Alignment.BottomEnd)
-                            .padding(16.dp),
-                        icon = {
-                            if (state.isProbing) {
-                                CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
-                            } else {
-                                Icon(Icons.Filled.GetApp, contentDescription = null)
-                            }
-                        },
-                        text = { Text("この投稿を保存") }
-                    )
-                }
-
-                BrowserControlBar(
-                    current = site,
-                    onSelect = { selected ->
-                        viewModel.openSite(selected)
-                        webViewRef?.loadUrl(selected.homeUrl)
-                    }
-                )
-            }
+            s.pickerSelected.sorted().joinToString(",")
         }
 
-        if (state.pickerEntries != null) {
-            MediaPickerDialog(
-                entries = state.pickerEntries.orEmpty(),
-                selected = state.pickerSelected,
-                onToggle = viewModel::toggleSelected,
-                onSelectAll = viewModel::selectAll,
-                onClearAll = viewModel::clearSelection,
-                onConfirm = { viewModel.confirmPickerDownload(context) },
-                onDismiss = viewModel::dismissPicker
-            )
-        }
+        DownloadActions.submit(context, s.pickerSourceUrl, playlistItems = playlistItems)
+        Toast.makeText(context, "ダウンロードを開始しました（${s.pickerSelected.size}件）", Toast.LENGTH_SHORT).show()
+        dismissPicker()
     }
-}
-
-@Composable
-private fun BrowserHome(onSelect: (SnsSite) -> Unit) {
-    Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
-        Text(
-            text = "SNSを選んでください（ログイン状態は保持されます）",
-            style = MaterialTheme.typography.bodyMedium,
-            modifier = Modifier.padding(bottom = 12.dp)
-        )
-        LazyVerticalGrid(
-            columns = GridCells.Fixed(2),
-            horizontalArrangement = Arrangement.spacedBy(12.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
-            items(SnsSite.values().toList()) { site ->
-                Card(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .aspectRatio(1.4f),
-                ) {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .padding(12.dp),
-                        verticalArrangement = Arrangement.Center,
-                        horizontalAlignment = Alignment.CenterHorizontally
-                    ) {
-                        IconButton(onClick = { onSelect(site) }) {
-                            SnsGlyph(site, size = 36.dp)
-                        }
-                        Text(site.displayName)
-                    }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun BrowserControlBar(current: SnsSite, onSelect: (SnsSite) -> Unit) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(vertical = 4.dp),
-        horizontalArrangement = Arrangement.SpaceEvenly
-    ) {
-        SnsSite.values().forEach { site ->
-            val isActive = site == current
-            IconButton(onClick = { onSelect(site) }) {
-                Box(
-                    modifier = Modifier
-                        .size(36.dp)
-                        .then(
-                            if (isActive) {
-                                Modifier.background(MaterialTheme.colorScheme.primaryContainer, CircleShape)
-                            } else {
-                                Modifier
-                            }
-                        ),
-                    contentAlignment = Alignment.Center
-                ) {
-                    SnsGlyph(site, size = 22.dp)
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun MediaPickerDialog(
-    entries: List<MediaEntry>,
-    selected: Set<Int>,
-    onToggle: (Int) -> Unit,
-    onSelectAll: () -> Unit,
-    onClearAll: () -> Unit,
-    onConfirm: () -> Unit,
-    onDismiss: () -> Unit
-) {
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("ダウンロードするメディアを選択（${selected.size} / ${entries.size} 件）") },
-        text = {
-            Column {
-                Row {
-                    TextButton(onClick = onSelectAll) { Text("全選択") }
-                    TextButton(onClick = onClearAll) { Text("全解除") }
-                }
-                LazyColumn(
-                    modifier = Modifier.heightIn(max = 320.dp),
-                    contentPadding = PaddingValues(vertical = 4.dp)
-                ) {
-                    items(entries) { entry ->
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Checkbox(
-                                checked = entry.index in selected,
-                                onCheckedChange = { onToggle(entry.index) }
-                            )
-                            Text(
-                                text = entry.title,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                        }
-                    }
-                }
-            }
-        },
-        confirmButton = {
-            Button(onClick = onConfirm, enabled = selected.isNotEmpty()) {
-                Text("ダウンロード")
-            }
-        },
-        dismissButton = {
-            TextButton(onClick = onDismiss) {
-                Icon(Icons.Filled.Close, contentDescription = null, modifier = Modifier.size(16.dp))
-                Text(" キャンセル")
-            }
-        }
-    )
 }
