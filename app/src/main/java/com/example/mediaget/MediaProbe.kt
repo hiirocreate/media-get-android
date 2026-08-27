@@ -25,7 +25,6 @@ object MediaProbe {
                 addOption("--flat-playlist")
                 addOption("--skip-download")
                 addOption("--no-warnings")
-                addOption("--no-playlist")
             }
             val response = YoutubeDL.getInstance().execute(request)
             val root = JSONObject(response.out.trim().lineSequence().lastOrNull { it.isNotBlank() } ?: response.out)
