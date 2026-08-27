@@ -23,8 +23,10 @@ object MediaProbe {
 
     // Hard cap for probeRecentPosts() — deliberately a fixed, small constant
     // rather than a caller-supplied value, so this can never be turned into
-    // an account-wide listing just by passing a bigger number in.
-    private const val RECENT_POSTS_LIMIT = 9999
+    // an account-wide listing just by passing a bigger number in. Not
+    // private so BrowserScreen.kt's button label can read it directly and
+    // never drift out of sync with the actual cap.
+    const val RECENT_POSTS_LIMIT = 9999
 
     suspend fun probe(url: String): ProbeResult = withContext(Dispatchers.IO) {
         try {
@@ -33,6 +35,7 @@ object MediaProbe {
                 addOption("--flat-playlist")
                 addOption("--skip-download")
                 addOption("--no-warnings")
+                addOption("--no-playlist")
             }
             val response = YoutubeDL.getInstance().execute(request)
             val root = JSONObject(response.out.trim().lineSequence().lastOrNull { it.isNotBlank() } ?: response.out)
