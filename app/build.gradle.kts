@@ -19,6 +19,23 @@ android {
         versionName = "1.0.0"
     }
 
+    // Without this, every GitHub Actions run signs the debug APK with a
+    // brand-new randomly generated key (the CI runner has no ~/.android
+    // folder to reuse), so each build's certificate differs from the last
+    // and Android refuses to install it as an update over the previous
+    // build ("App not installed" / signature mismatch) — forcing an
+    // uninstall every time. Pointing debug signing at a fixed keystore
+    // checked into the repo keeps every build's signature identical, so
+    // new builds install as a normal in-place update.
+    signingConfigs {
+        getByName("debug") {
+            storeFile = file("../keystore/debug.keystore")
+            storePassword = "android"
+            keyAlias = "androiddebugkey"
+            keyPassword = "android"
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
