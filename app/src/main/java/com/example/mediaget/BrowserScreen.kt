@@ -126,9 +126,38 @@ private const val DESKTOP_LAYOUT_FIX_JS = """
       document.head.appendChild(style);
     }
     style.textContent = 'html, body { max-width: 100% !important; overflow-x: hidden !important; } input, textarea, select { font-size: 16px !important; }';
-  } catch (e) {}
-})();
 """
+// Some sites' React-controlled inputs reset the caret to position 0 on
+// every re-render when squeezed into a narrower-than-tested width (like
+// the mobile width forced above on their desktop bundle) — this pins the
+// caret back to the end of whatever was typed after each keystroke, so
+// typing a password stays usable instead of jumping to the front.
+document.addEventListener('input', function(e) {
+  var el = e.target;
+  if (!el || (el.tagName !== 'INPUT' && el.tagName !== 'TEXTAREA')) return;
+  setTimeout(function() {
+    try {
+      var pos = el.value.length;
+      el.setSelectionRange(pos, pos);
+    } catch (err) {}
+  }, 0);
+}, true);
+
+// Suppress the page's own "scroll the focused field into view" while
+// actively typing — this is what makes the screen jump to the bottom on
+// every keystroke.
+if (!window.__mediaGetScrollPatched) {
+  window.__mediaGetScrollPatched = true;
+  var originalScrollIntoView = Element.prototype.scrollIntoView;
+  Element.prototype.scrollIntoView = function() {
+    var active = document.activeElement;
+    if (active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA')) {
+      return;
+    }
+    return originalScrollIntoView.apply(this, arguments);
+  };
+}
+
 
 /**
  * Heuristic: is the WebView currently sitting on an account/profile page
