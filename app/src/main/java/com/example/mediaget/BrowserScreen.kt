@@ -70,96 +70,32 @@ private const val MOBILE_CHROME_USER_AGENT =
         "(KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36"
 
 /**
- * A stock desktop-Chrome-on-Windows UA string. Instagram/TikTok's login and
- * "open in app" gating mostly targets the *mobile* web experience — asking
- * for the desktop site (same trick as "Request Desktop Site" in every mobile
- * browser) sidesteps a lot of it, at the cost of a desktop-width layout that
- * needs pinch-zoom/pan to use comfortably on a phone screen.
+ * A stock Android-tablet Chrome UA string (same Chrome build as the phone UA
+ * above, just without the "Mobile" token and with a tablet-class device
+ * name — the actual signal sites use to tell phone from tablet). Instagram/
+ * TikTok/X's "open in app" and login-blocking mostly targets *phone-sized*
+ * mobile web traffic; tablets get treated as a normal touch browser and
+ * served each site's own properly responsive, touch/on-screen-keyboard-aware
+ * layout — no reflow or input-behavior patches of ours required, unlike the
+ * old "spoof desktop, force it to reflow narrow" approach this replaced,
+ * which kept fighting sites' own JS (scroll jumps, a white screen after
+ * login, off-screen fields).
  */
-private const val DESKTOP_CHROME_USER_AGENT =
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
+private const val TABLET_CHROME_USER_AGENT =
+    "Mozilla/5.0 (Linux; Android 14; SM-X200) AppleWebKit/537.36 " +
         "(KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
 
-/** Applies the mobile/desktop presentation to this WebView. Returns true if anything changed. */
-private fun WebView.applyDisplayMode(desktopMode: Boolean): Boolean {
-    val desiredUa = if (desktopMode) DESKTOP_CHROME_USER_AGENT else MOBILE_CHROME_USER_AGENT
+/** Applies the phone/tablet presentation to this WebView. Returns true if anything changed. */
+private fun WebView.applyDisplayMode(tabletMode: Boolean): Boolean {
+    val desiredUa = if (tabletMode) TABLET_CHROME_USER_AGENT else MOBILE_CHROME_USER_AGENT
     val changed = settings.userAgentString != desiredUa
     settings.userAgentString = desiredUa
-    // Required for WebView to honor any <meta name="viewport"> tag at all —
-    // including the one DESKTOP_LAYOUT_FIX_JS injects below.
+    // Lets WebView honor whatever <meta name="viewport"> each site ships on
+    // its own tablet layout — we no longer inject or override one ourselves.
     settings.useWideViewPort = true
-    // "Overview mode" shrinks a desktop-width page to fit the screen as a
-    // fallback while the page is loading, before the JS fix below re-flows it
-    // properly; harmless to leave on for the mobile UA too.
     settings.loadWithOverviewMode = true
     return changed
 }
-
-/**
- * Desktop sites are built for a ~980px-wide layout and often ship no (or a
- * non-mobile) viewport tag. Rather than just shrinking that whole wide page
- * to fit the phone screen — which is what "PC表示" alone gives you, and why
- * everything ends up tiny until you pinch-zoom — this forces the page to
- * actually reflow at the phone's real width, the same way it would if a
- * normal mobile browser had asked for it.
- */
-private const val DESKTOP_LAYOUT_FIX_JS = """
-(function() {
-  try {
-    var meta = document.querySelector('meta[name="viewport"]');
-    if (!meta) {
-      meta = document.createElement('meta');
-      meta.setAttribute('name', 'viewport');
-      document.head.appendChild(meta);
-    }
-    // maximum-scale=1 / user-scalable=no here (only in "PC表示" mode) stops
-    // Android WebView's own "auto-zoom into the focused input" behavior,
-    // which is what made the screen jump/scroll while typing into a login
-    // field on a desktop-layout page — the page itself never asked to zoom,
-    // WebView was doing it on every focus/re-render.
-    meta.setAttribute('content', 'width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no');
-
-    var style = document.getElementById('mediaget-layout-fix');
-    if (!style) {
-      style = document.createElement('style');
-      style.id = 'mediaget-layout-fix';
-      document.head.appendChild(style);
-    }
-    style.textContent = 'html, body { max-width: 100% !important; overflow-x: hidden !important; } input, textarea, select { font-size: 16px !important; }';
-
-    // Some sites' React-controlled inputs reset the caret to position 0 on
-    // every re-render when squeezed into a narrower-than-tested width (like
-    // the mobile width forced above on their desktop bundle) — this pins the
-    // caret back to the end of whatever was typed after each keystroke, so
-    // typing a password stays usable instead of jumping to the front.
-    document.addEventListener('input', function(e) {
-      var el = e.target;
-      if (!el || (el.tagName !== 'INPUT' && el.tagName !== 'TEXTAREA')) return;
-      setTimeout(function() {
-        try {
-          var pos = el.value.length;
-          el.setSelectionRange(pos, pos);
-        } catch (err) {}
-      }, 0);
-    }, true);
-
-    // Suppress the page's own "scroll the focused field into view" while
-    // actively typing — this is what makes the screen jump to the bottom on
-    // every keystroke.
-    if (!window.__mediaGetScrollPatched) {
-      window.__mediaGetScrollPatched = true;
-      var originalScrollIntoView = Element.prototype.scrollIntoView;
-      Element.prototype.scrollIntoView = function() {
-        var active = document.activeElement;
-        if (active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA')) {
-          return;
-        }
-        return originalScrollIntoView.apply(this, arguments);
-      };
-    }
-  } catch (e) {}
-})();
-"""
 
 /**
  * Heuristic: is the WebView currently sitting on an account/profile page
@@ -224,7 +160,7 @@ fun BrowserScreen(viewModel: BrowserViewModel) {
     val state by viewModel.state.collectAsState()
     val context = LocalContext.current
     var webViewRef by remember { mutableStateOf<WebView?>(null) }
-    var desktopMode by rememberSaveable { mutableStateOf(false) }
+    var tabletMode by rememberSaveable { mutableStateOf(false) }
 
     BackHandler(enabled = state.currentSite != null) {
         val wv = webViewRef
@@ -256,9 +192,9 @@ fun BrowserScreen(viewModel: BrowserViewModel) {
                         overflow = TextOverflow.Ellipsis
                     )
                     FilterChip(
-                        selected = desktopMode,
-                        onClick = { desktopMode = !desktopMode },
-                        label = { Text("PC表示") }
+                        selected = tabletMode,
+                        onClick = { tabletMode = !tabletMode },
+                        label = { Text("タブレット表示") }
                     )
                 }
 
@@ -280,9 +216,6 @@ fun BrowserScreen(viewModel: BrowserViewModel) {
                                     override fun onPageFinished(view: WebView?, url: String?) {
                                         super.onPageFinished(view, url)
                                         if (url != null) viewModel.onPageUrlChanged(url)
-                                        if (desktopMode) {
-                                            view?.evaluateJavascript(DESKTOP_LAYOUT_FIX_JS, null)
-                                        }
                                     }
                                 }
                                 // Login flows (Google/Apple sign-in popups, etc.) often open
@@ -316,16 +249,16 @@ fun BrowserScreen(viewModel: BrowserViewModel) {
                                 // "in-app browser" and respond by disabling scrolling,
                                 // gating features, or nagging to open their own app;
                                 // Instagram/TikTok's login also often refuses to render
-                                // at all in mobile-web mode. applyDisplayMode() picks
-                                // the mobile- or desktop-Chrome UA per the toggle above.
-                                applyDisplayMode(desktopMode)
+                                // at all in mobile-phone-web mode. applyDisplayMode() picks
+                                // the phone- or tablet-Chrome UA per the toggle above.
+                                applyDisplayMode(tabletMode)
                                 loadUrl(site.homeUrl)
                                 webViewRef = this
                             }
                         },
                         update = { webView ->
                             webViewRef = webView
-                            if (webView.applyDisplayMode(desktopMode)) {
+                            if (webView.applyDisplayMode(tabletMode)) {
                                 webView.reload()
                             }
                         }
