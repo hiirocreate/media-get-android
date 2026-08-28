@@ -29,6 +29,7 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.GetApp
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.List
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -184,6 +185,13 @@ fun BrowserScreen(viewModel: BrowserViewModel) {
                     }
                     IconButton(onClick = { webViewRef?.let { if (it.canGoBack()) it.goBack() } }) {
                         Icon(Icons.Filled.ArrowBack, contentDescription = "戻る")
+                    }
+                    // Some flows (e.g. Instagram's "承認してください" other-device
+                    // approval) update on the server side but don't push that
+                    // change back into an already-open page — reloading is the
+                    // manual way to pick up the new state without navigating away.
+                    IconButton(onClick = { webViewRef?.reload() }) {
+                        Icon(Icons.Filled.Refresh, contentDescription = "更新")
                     }
                     Text(
                         text = site.displayName,
