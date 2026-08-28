@@ -71,19 +71,17 @@ private const val MOBILE_CHROME_USER_AGENT =
         "(KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36"
 
 /**
- * A stock Android-tablet Chrome UA string (same Chrome build as the phone UA
- * above, just without the "Mobile" token and with a tablet-class device
- * name — the actual signal sites use to tell phone from tablet). Instagram/
- * TikTok/X's "open in app" and login-blocking mostly targets *phone-sized*
- * mobile web traffic; tablets get treated as a normal touch browser and
- * served each site's own properly responsive, touch/on-screen-keyboard-aware
- * layout — no reflow or input-behavior patches of ours required, unlike the
- * old "spoof desktop, force it to reflow narrow" approach this replaced,
- * which kept fighting sites' own JS (scroll jumps, a white screen after
- * login, off-screen fields).
+ * Same idea as before (no "Mobile" token, so sites treat this as a tablet-
+ * class touch browser rather than the phone-web experience they gate), but
+ * the device name now matches the actual phone this app runs on (OUKITEL
+ * C50) instead of a made-up Samsung tablet model. A UA claiming a device
+ * that doesn't match the real hardware is itself one more signal a site's
+ * fraud/device-recognition system can use to flag "unrecognized device" —
+ * this narrows that gap while keeping the non-"Mobile" trick that gets the
+ * login screen to render at all.
  */
 private const val TABLET_CHROME_USER_AGENT =
-    "Mozilla/5.0 (Linux; Android 14; SM-X200) AppleWebKit/537.36 " +
+    "Mozilla/5.0 (Linux; Android 14; OUKITEL C50) AppleWebKit/537.36 " +
         "(KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
 
 /** Applies the phone/tablet presentation to this WebView. Returns true if anything changed. */
@@ -224,6 +222,21 @@ fun BrowserScreen(viewModel: BrowserViewModel) {
                                     override fun onPageFinished(view: WebView?, url: String?) {
                                         super.onPageFinished(view, url)
                                         if (url != null) viewModel.onPageUrlChanged(url)
+                                    }
+
+                                    // TikTok (and some other sites) try to bounce the browser
+                                    // straight to a custom app-deep-link scheme (tiktok://,
+                                    // intent://, etc.) as their "open in app" mechanism. A plain
+                                    // WebView tries to actually navigate to that scheme and fails
+                                    // with net::ERR_UNKNOWN_URL_SCHEME, blanking the whole page —
+                                    // this just ignores anything that isn't a normal web address
+                                    // instead, so the page underneath keeps loading normally.
+                                    override fun shouldOverrideUrlLoading(
+                                        view: WebView,
+                                        request: android.webkit.WebResourceRequest
+                                    ): Boolean {
+                                        val scheme = request.url.scheme?.lowercase()
+                                        return scheme != "http" && scheme != "https"
                                     }
                                 }
                                 // Login flows (Google/Apple sign-in popups, etc.) often open
