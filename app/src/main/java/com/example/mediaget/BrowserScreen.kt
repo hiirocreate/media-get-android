@@ -97,6 +97,31 @@ private fun WebView.applyDisplayMode(tabletMode: Boolean): Boolean {
 }
 
 /**
+ * Best-effort hiding of TikTok's "open in app" nag banner — pure CSS, no
+ * behavior changes to the page (unlike the earlier scroll/caret JS patches
+ * that caused more problems than they solved), so the worst case here is
+ * simply "doesn't hide it" rather than breaking something else. Scoped to
+ * tiktok.com only. The selectors are a guess at commonly-used patterns for
+ * this kind of banner and may need adjusting once we see it live.
+ */
+private const val TIKTOK_HIDE_APP_BANNER_JS = """
+(function() {
+  try {
+    var style = document.getElementById('mediaget-tiktok-banner-fix');
+    if (!style) {
+      style = document.createElement('style');
+      style.id = 'mediaget-tiktok-banner-fix';
+      document.head.appendChild(style);
+    }
+    style.textContent =
+      '[data-e2e*="open-app"], [data-e2e*="download-guide"], [data-e2e*="feed-guide"], ' +
+      '[data-e2e*="top-guide"], [class*="DivGuideContainer"], [class*="DivBanner"], ' +
+      '[class*="download-btn"], [class*="app-banner"] { display: none !important; }';
+  } catch (e) {}
+})();
+"""
+
+/**
  * Heuristic: is the WebView currently sitting on an account/profile page
  * (e.g. instagram.com/someuser/) rather than a specific post/reel/video?
  * Used only to decide the save button's label and target — it never triggers
@@ -222,6 +247,9 @@ fun BrowserScreen(viewModel: BrowserViewModel) {
                                     override fun onPageFinished(view: WebView?, url: String?) {
                                         super.onPageFinished(view, url)
                                         if (url != null) viewModel.onPageUrlChanged(url)
+                                        if (url != null && url.contains("tiktok.com")) {
+                                            view?.evaluateJavascript(TIKTOK_HIDE_APP_BANNER_JS, null)
+                                        }
                                     }
 
                                     // TikTok (and some other sites) try to bounce the browser
