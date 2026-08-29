@@ -1,5 +1,6 @@
 package com.example.mediaget
 
+import android.content.Context
 import com.yausername.youtubedl_android.YoutubeDL
 import com.yausername.youtubedl_android.YoutubeDLRequest
 import kotlinx.coroutines.Dispatchers
@@ -26,9 +27,9 @@ object MediaProbe {
     // an account-wide listing just by passing a bigger number in. Not
     // private so BrowserScreen.kt's button label can read it directly and
     // never drift out of sync with the actual cap.
-    const val RECENT_POSTS_LIMIT = 9999
+    const val RECENT_POSTS_LIMIT = 3
 
-    suspend fun probe(url: String): ProbeResult = withContext(Dispatchers.IO) {
+    suspend fun probe(context: Context, url: String): ProbeResult = withContext(Dispatchers.IO) {
         try {
             val request = YoutubeDLRequest(url).apply {
                 addOption("--dump-single-json")
@@ -36,6 +37,7 @@ object MediaProbe {
                 addOption("--skip-download")
                 addOption("--no-warnings")
                 addOption("--no-playlist")
+                applyCookies(context, url)
             }
             val response = YoutubeDL.getInstance().execute(request)
             val root = JSONObject(response.out.trim().lineSequence().lastOrNull { it.isNotBlank() } ?: response.out)
@@ -73,39 +75,41 @@ object MediaProbe {
      * the result feeds straight back into [probe]/[DownloadActions.submit]
      * exactly as if the user had opened and shared that one post directly.
      */
-    suspend fun resolveLatestPostUrl(site: SnsSite, profileUrl: String): Result<String> = withContext(Dispatchers.IO) {
-        try {
-            val request = YoutubeDLRequest(profileUrl).apply {
-                addOption("--dump-single-json")
-                addOption("--flat-playlist")
-                addOption("--skip-download")
-                addOption("--no-warnings")
-                addOption("--playlist-items", "9999")
-            }
-            val response = YoutubeDL.getInstance().execute(request)
-            val root = JSONObject(response.out.trim().lineSequence().lastOrNull { it.isNotBlank() } ?: response.out)
+    suspend fun resolveLatestPostUrl(context: Context, site: SnsSite, profileUrl: String): Result<String> =
+        withContext(Dispatchers.IO) {
+            try {
+                val request = YoutubeDLRequest(profileUrl).apply {
+                    addOption("--dump-single-json")
+                    addOption("--flat-playlist")
+                    addOption("--skip-download")
+                    addOption("--no-warnings")
+                    addOption("--playlist-items", "1")
+                    applyCookies(context, profileUrl)
+                }
+                val response = YoutubeDL.getInstance().execute(request)
+                val root = JSONObject(response.out.trim().lineSequence().lastOrNull { it.isNotBlank() } ?: response.out)
 
-            val firstEntry: JSONObject? = if (root.has("entries")) {
-                val arr = root.getJSONArray("entries")
-                if (arr.length() > 0) arr.optJSONObject(0) else null
-            } else {
-                root
-            }
+                val firstEntry: JSONObject? = if (root.has("entries")) {
+                    val arr = root.getJSONArray("entries")
+                    if (arr.length() > 0) arr.optJSONObject(0) else null
+                } else {
+                    root
+                }
 
-            if (firstEntry == null) {
-                return@withContext Result.failure(IllegalStateException("投稿が見つかりませんでした"))
-            }
+                if (firstEntry == null) {
+                    return@withContext Result.failure(IllegalStateException("投稿が見つかりませんでした"))
+                }
 
-            val resolvedUrl = resolveEntryUrl(site, firstEntry)
-            if (resolvedUrl.isBlank()) {
-                Result.failure(IllegalStateException("投稿のURLを特定できませんでした"))
-            } else {
-                Result.success(resolvedUrl)
+                val resolvedUrl = resolveEntryUrl(site, firstEntry)
+                if (resolvedUrl.isBlank()) {
+                    Result.failure(IllegalStateException("投稿のURLを特定できませんでした"))
+                } else {
+                    Result.success(resolvedUrl)
+                }
+            } catch (e: Exception) {
+                Result.failure(e)
             }
-        } catch (e: Exception) {
-            Result.failure(e)
         }
-    }
 
     /**
      * Given a *profile* page URL, lists just that account's [RECENT_POSTS_LIMIT]
@@ -115,7 +119,7 @@ object MediaProbe {
      * exactly as if it had been opened and saved individually — this never
      * reads or downloads anything from the account beyond this short list.
      */
-    suspend fun probeRecentPosts(site: SnsSite, profileUrl: String): Result<List<ProfilePostCandidate>> =
+    suspend fun probeRecentPosts(context: Context, site: SnsSite, profileUrl: String): Result<List<ProfilePostCandidate>> =
         withContext(Dispatchers.IO) {
             try {
                 val request = YoutubeDLRequest(profileUrl).apply {
@@ -124,6 +128,7 @@ object MediaProbe {
                     addOption("--skip-download")
                     addOption("--no-warnings")
                     addOption("--playlist-items", "1-$RECENT_POSTS_LIMIT")
+                    applyCookies(context, profileUrl)
                 }
                 val response = YoutubeDL.getInstance().execute(request)
                 val root = JSONObject(response.out.trim().lineSequence().lastOrNull { it.isNotBlank() } ?: response.out)
@@ -157,6 +162,16 @@ object MediaProbe {
                 Result.failure(e)
             }
         }
+
+    // yt-dlp runs as a separate process with no knowledge of the in-app
+    // browser's login session by default — this is what made "ログインでき
+    // ているのにダウンロードできない" happen. Exporting the WebView's cookies
+    // for this URL and pointing yt-dlp at them makes every probe/download use
+    // the same authenticated session the user is actually looking at.
+    private fun YoutubeDLRequest.applyCookies(context: Context, url: String) {
+        val cookieFile = CookieExporter.exportForUrl(context, url) ?: return
+        addOption("--cookies", cookieFile.absolutePath)
+    }
 
     private fun resolveEntryUrl(site: SnsSite, entry: JSONObject): String {
         val candidate = entry.optString("webpage_url").ifBlank { entry.optString("url") }
