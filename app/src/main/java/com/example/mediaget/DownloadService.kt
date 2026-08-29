@@ -98,8 +98,15 @@ class DownloadService : Service() {
         try {
             val request = YoutubeDLRequest(job.url).apply {
                 addOption("-o", File(tmpDir, "%(title).100s-%(id)s.%(ext)s").absolutePath)
+                addOption("--no-playlist")
                 if (!job.playlistItems.isNullOrBlank()) {
                     addOption("--playlist-items", job.playlistItems)
+                }
+                // Same reasoning as MediaProbe's applyCookies() — without this,
+                // a login-required post downloads as a logged-out request and
+                // fails even though the browser tab shows you logged in.
+                CookieExporter.exportForUrl(applicationContext, job.url)?.let { cookieFile ->
+                    addOption("--cookies", cookieFile.absolutePath)
                 }
                 when (job.mode) {
                     DownloadMode.AUTO -> { /* let yt-dlp pick the best match for the link */ }
