@@ -43,11 +43,11 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -184,11 +184,26 @@ fun BrowserScreen(viewModel: BrowserViewModel) {
     val state by viewModel.state.collectAsState()
     val context = LocalContext.current
     var webViewRef by remember { mutableStateOf<WebView?>(null) }
-    var tabletMode by rememberSaveable { mutableStateOf(false) }
+    val tabletMode = state.tabletMode
 
     BackHandler(enabled = state.currentSite != null) {
         val wv = webViewRef
         if (wv != null && wv.canGoBack()) wv.goBack() else viewModel.goHome()
+    }
+
+    // BrowserScreen (and the native WebView inside it) is fully torn down
+    // and rebuilt every time the user leaves and returns to the "ブラウザ"
+    // タブ — this snapshots the WebView's navigation/scroll state right
+    // before that teardown so it can be restored instead of bouncing back
+    // to the SNS's home page every time.
+    DisposableEffect(Unit) {
+        onDispose {
+            webViewRef?.let { wv ->
+                val bundle = android.os.Bundle()
+                wv.saveState(bundle)
+                viewModel.savedWebViewState = bundle
+            }
+        }
     }
 
     Box(modifier = Modifier.fillMaxSize()) {
@@ -196,11 +211,109 @@ fun BrowserScreen(viewModel: BrowserViewModel) {
         if (site == null) {
             BrowserHome(onSelect = { viewModel.openSite(it) })
         } else {
-            Column(modifier = Modifier.fillMaxSize()) {
+            // The WebView fills the *entire* screen here (not squeezed between a
+            // top bar row and a bottom bar row) so sites that size themselves off
+            // the real viewport height — Instagram Stories being the clearest
+            // example — get accurate full-screen math instead of being crushed
+            // into whatever was left over. All of MediaGet's own chrome (top
+            // bar, save button(s), SNS switcher) floats on top as translucent
+            // overlays instead of reserving its own dedicated space.
+            Box(modifier = Modifier.fillMaxSize()) {
+                AndroidView(
+                    modifier = Modifier.fillMaxSize(),
+                    factory = { ctx ->
+                        WebView(ctx).apply {
+                            settings.javaScriptEnabled = true
+                            settings.domStorageEnabled = true
+                            settings.setSupportMultipleWindows(true)
+                            settings.javaScriptCanOpenWindowsAutomatically = true
+                            settings.setSupportZoom(true)
+                            settings.builtInZoomControls = true
+                            settings.displayZoomControls = false
+                            CookieManager.getInstance().setAcceptCookie(true)
+                            CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
+                            webViewClient = object : WebViewClient() {
+                                override fun onPageFinished(view: WebView?, url: String?) {
+                                    super.onPageFinished(view, url)
+                                    if (url != null) viewModel.onPageUrlChanged(url)
+                                    if (url != null && url.contains("tiktok.com")) {
+                                        view?.evaluateJavascript(TIKTOK_HIDE_APP_BANNER_JS, null)
+                                    }
+                                }
+
+                                // TikTok (and some other sites) try to bounce the browser
+                                // straight to a custom app-deep-link scheme (tiktok://,
+                                // intent://, etc.) as their "open in app" mechanism. A plain
+                                // WebView tries to actually navigate to that scheme and fails
+                                // with net::ERR_UNKNOWN_URL_SCHEME, blanking the whole page —
+                                // this just ignores anything that isn't a normal web address
+                                // instead, so the page underneath keeps loading normally.
+                                override fun shouldOverrideUrlLoading(
+                                    view: WebView,
+                                    request: android.webkit.WebResourceRequest
+                                ): Boolean {
+                                    val scheme = request.url.scheme?.lowercase()
+                                    return scheme != "http" && scheme != "https"
+                                }
+                            }
+                            // Login flows (Google/Apple sign-in popups, etc.) often open
+                            // via window.open() / target="_blank". A plain WebView drops
+                            // those silently, so route the popup's URL back into this
+                            // same WebView instead of losing it.
+                            webChromeClient = object : WebChromeClient() {
+                                override fun onCreateWindow(
+                                    view: WebView,
+                                    isDialog: Boolean,
+                                    isUserGesture: Boolean,
+                                    resultMsg: android.os.Message
+                                ): Boolean {
+                                    val popupWebView = WebView(view.context)
+                                    popupWebView.webViewClient = object : WebViewClient() {
+                                        override fun shouldOverrideUrlLoading(
+                                            popupView: WebView,
+                                            request: android.webkit.WebResourceRequest
+                                        ): Boolean {
+                                            view.loadUrl(request.url.toString())
+                                            return true
+                                        }
+                                    }
+                                    val transport = resultMsg.obj as WebView.WebViewTransport
+                                    transport.webView = popupWebView
+                                    resultMsg.sendToTarget()
+                                    return true
+                                }
+                            }
+                            // TikTok/X/Threads detect the default WebView UA as an
+                            // "in-app browser" and respond by disabling scrolling,
+                            // gating features, or nagging to open their own app;
+                            // Instagram/TikTok's login also often refuses to render
+                            // at all in mobile-phone-web mode. applyDisplayMode() picks
+                            // the phone- or tablet-Chrome UA per the toggle above.
+                            applyDisplayMode(tabletMode)
+                            val saved = viewModel.savedWebViewState
+                            if (saved != null) {
+                                restoreState(saved)
+                                viewModel.savedWebViewState = null
+                            } else {
+                                loadUrl(site.homeUrl)
+                            }
+                            webViewRef = this
+                        }
+                    },
+                    update = { webView ->
+                        webViewRef = webView
+                        if (webView.applyDisplayMode(tabletMode)) {
+                            webView.reload()
+                        }
+                    }
+                )
+
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                     modifier = Modifier
+                        .align(Alignment.TopCenter)
                         .fillMaxWidth()
+                        .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.94f))
                         .padding(horizontal = 4.dp, vertical = 4.dp)
                 ) {
                     IconButton(onClick = { viewModel.goHome() }) {
@@ -224,136 +337,39 @@ fun BrowserScreen(viewModel: BrowserViewModel) {
                     )
                     FilterChip(
                         selected = tabletMode,
-                        onClick = { tabletMode = !tabletMode },
+                        onClick = { viewModel.setTabletMode(!tabletMode) },
                         label = { Text("タブレット表示") }
                     )
                 }
 
-                Box(modifier = Modifier.weight(1f)) {
-                    AndroidView(
-                        modifier = Modifier.fillMaxSize(),
-                        factory = { ctx ->
-                            WebView(ctx).apply {
-                                settings.javaScriptEnabled = true
-                                settings.domStorageEnabled = true
-                                settings.setSupportMultipleWindows(true)
-                                settings.javaScriptCanOpenWindowsAutomatically = true
-                                settings.setSupportZoom(true)
-                                settings.builtInZoomControls = true
-                                settings.displayZoomControls = false
-                                CookieManager.getInstance().setAcceptCookie(true)
-                                CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
-                                webViewClient = object : WebViewClient() {
-                                    override fun onPageFinished(view: WebView?, url: String?) {
-                                        super.onPageFinished(view, url)
-                                        if (url != null) viewModel.onPageUrlChanged(url)
-                                        if (url != null && url.contains("tiktok.com")) {
-                                            view?.evaluateJavascript(TIKTOK_HIDE_APP_BANNER_JS, null)
-                                        }
-                                    }
+                val onProfilePage = remember(state.currentUrl, site) { isProfileUrl(site, state.currentUrl) }
+                // Extra bottom padding here clears the SNS switcher bar docked at
+                // the very bottom, so the save button(s) never sit on top of it.
+                val fabBottomPadding = 64.dp
 
-                                    // TikTok (and some other sites) try to bounce the browser
-                                    // straight to a custom app-deep-link scheme (tiktok://,
-                                    // intent://, etc.) as their "open in app" mechanism. A plain
-                                    // WebView tries to actually navigate to that scheme and fails
-                                    // with net::ERR_UNKNOWN_URL_SCHEME, blanking the whole page —
-                                    // this just ignores anything that isn't a normal web address
-                                    // instead, so the page underneath keeps loading normally.
-                                    override fun shouldOverrideUrlLoading(
-                                        view: WebView,
-                                        request: android.webkit.WebResourceRequest
-                                    ): Boolean {
-                                        val scheme = request.url.scheme?.lowercase()
-                                        return scheme != "http" && scheme != "https"
-                                    }
-                                }
-                                // Login flows (Google/Apple sign-in popups, etc.) often open
-                                // via window.open() / target="_blank". A plain WebView drops
-                                // those silently, so route the popup's URL back into this
-                                // same WebView instead of losing it.
-                                webChromeClient = object : WebChromeClient() {
-                                    override fun onCreateWindow(
-                                        view: WebView,
-                                        isDialog: Boolean,
-                                        isUserGesture: Boolean,
-                                        resultMsg: android.os.Message
-                                    ): Boolean {
-                                        val popupWebView = WebView(view.context)
-                                        popupWebView.webViewClient = object : WebViewClient() {
-                                            override fun shouldOverrideUrlLoading(
-                                                popupView: WebView,
-                                                request: android.webkit.WebResourceRequest
-                                            ): Boolean {
-                                                view.loadUrl(request.url.toString())
-                                                return true
-                                            }
-                                        }
-                                        val transport = resultMsg.obj as WebView.WebViewTransport
-                                        transport.webView = popupWebView
-                                        resultMsg.sendToTarget()
-                                        return true
-                                    }
-                                }
-                                // TikTok/X/Threads detect the default WebView UA as an
-                                // "in-app browser" and respond by disabling scrolling,
-                                // gating features, or nagging to open their own app;
-                                // Instagram/TikTok's login also often refuses to render
-                                // at all in mobile-phone-web mode. applyDisplayMode() picks
-                                // the phone- or tablet-Chrome UA per the toggle above.
-                                applyDisplayMode(tabletMode)
-                                loadUrl(site.homeUrl)
-                                webViewRef = this
-                            }
-                        },
-                        update = { webView ->
-                            webViewRef = webView
-                            if (webView.applyDisplayMode(tabletMode)) {
-                                webView.reload()
-                            }
-                        }
-                    )
-
-                    val onProfilePage = remember(state.currentUrl, site) { isProfileUrl(site, state.currentUrl) }
-
-                    if (onProfilePage) {
-                        // Two bounded options — the single newest post, or a hand-pick
-                        // from just the newest few — never a "get everything" button.
-                        Column(
-                            horizontalAlignment = Alignment.End,
-                            verticalArrangement = Arrangement.spacedBy(8.dp),
-                            modifier = Modifier
-                                .align(Alignment.BottomEnd)
-                                .padding(16.dp)
-                        ) {
-                            ExtendedFloatingActionButton(
-                                onClick = { viewModel.requestRecentPosts(context) },
-                                icon = {
-                                    if (state.isProbing) {
-                                        CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
-                                    } else {
-                                        Icon(Icons.Filled.List, contentDescription = null)
-                                    }
-                                },
-                                text = { Text("直近${MediaProbe.RECENT_POSTS_LIMIT}件から選ぶ") }
-                            )
-                            ExtendedFloatingActionButton(
-                                onClick = { viewModel.requestDownloadLatestPost(context) },
-                                icon = {
-                                    if (state.isProbing) {
-                                        CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
-                                    } else {
-                                        Icon(Icons.Filled.GetApp, contentDescription = null)
-                                    }
-                                },
-                                text = { Text("最新の投稿を保存") }
-                            )
-                        }
-                    } else {
+                if (onProfilePage) {
+                    // Two bounded options — the single newest post, or a hand-pick
+                    // from just the newest few — never a "get everything" button.
+                    Column(
+                        horizontalAlignment = Alignment.End,
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                        modifier = Modifier
+                            .align(Alignment.BottomEnd)
+                            .padding(end = 16.dp, top = 16.dp, bottom = fabBottomPadding)
+                    ) {
                         ExtendedFloatingActionButton(
-                            onClick = { viewModel.requestDownload(context) },
-                            modifier = Modifier
-                                .align(Alignment.BottomEnd)
-                                .padding(16.dp),
+                            onClick = { viewModel.requestRecentPosts(context) },
+                            icon = {
+                                if (state.isProbing) {
+                                    CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+                                } else {
+                                    Icon(Icons.Filled.List, contentDescription = null)
+                                }
+                            },
+                            text = { Text("直近${MediaProbe.RECENT_POSTS_LIMIT}件から選ぶ") }
+                        )
+                        ExtendedFloatingActionButton(
+                            onClick = { viewModel.requestDownloadLatestPost(context) },
                             icon = {
                                 if (state.isProbing) {
                                     CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
@@ -361,9 +377,24 @@ fun BrowserScreen(viewModel: BrowserViewModel) {
                                     Icon(Icons.Filled.GetApp, contentDescription = null)
                                 }
                             },
-                            text = { Text("この投稿を保存") }
+                            text = { Text("最新の投稿を保存") }
                         )
                     }
+                } else {
+                    ExtendedFloatingActionButton(
+                        onClick = { viewModel.requestDownload(context) },
+                        modifier = Modifier
+                            .align(Alignment.BottomEnd)
+                            .padding(end = 16.dp, bottom = fabBottomPadding),
+                        icon = {
+                            if (state.isProbing) {
+                                CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+                            } else {
+                                Icon(Icons.Filled.GetApp, contentDescription = null)
+                            }
+                        },
+                        text = { Text("この投稿を保存") }
+                    )
                 }
 
                 BrowserControlBar(
@@ -371,7 +402,8 @@ fun BrowserScreen(viewModel: BrowserViewModel) {
                     onSelect = { selected ->
                         viewModel.openSite(selected)
                         webViewRef?.loadUrl(selected.homeUrl)
-                    }
+                    },
+                    modifier = Modifier.align(Alignment.BottomCenter)
                 )
             }
         }
@@ -443,10 +475,11 @@ private fun BrowserHome(onSelect: (SnsSite) -> Unit) {
 }
 
 @Composable
-private fun BrowserControlBar(current: SnsSite, onSelect: (SnsSite) -> Unit) {
+private fun BrowserControlBar(current: SnsSite, onSelect: (SnsSite) -> Unit, modifier: Modifier = Modifier) {
     Row(
-        modifier = Modifier
+        modifier = modifier
             .fillMaxWidth()
+            .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.94f))
             .padding(vertical = 4.dp),
         horizontalArrangement = Arrangement.SpaceEvenly
     ) {
