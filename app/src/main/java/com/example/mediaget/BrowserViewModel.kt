@@ -1,210 +1,196 @@
 package com.example.mediaget
 
 import android.content.Context
-import android.widget.Toast
-import androidx.lifecycle.ViewModel
-import androidx.lifecycle.viewModelScope
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.update
-import kotlinx.coroutines.launch
+import com.yausername.youtubedl_android.YoutubeDL
+import com.yausername.youtubedl_android.YoutubeDLRequest
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import org.json.JSONObject
 
-enum class SnsSite(val displayName: String, val homeUrl: String) {
-    INSTAGRAM("Instagram", "https://www.instagram.com/"),
-    TIKTOK("TikTok", "https://www.tiktok.com/"),
-    YOUTUBE("YouTube", "https://www.youtube.com/"),
-    X("X", "https://x.com/"),
-    THREADS("Threads", "https://www.threads.com/")
+sealed class ProbeResult {
+    data class Success(val entries: List<MediaEntry>) : ProbeResult()
+    data class Failure(val message: String) : ProbeResult()
 }
 
-data class BrowserUiState(
-    val currentSite: SnsSite? = null,
-    val currentUrl: String = "",
-    val isProbing: Boolean = false,
-    val pickerEntries: List<MediaEntry>? = null,
-    val pickerSelected: Set<Int> = emptySet(),
-    val pickerSourceUrl: String = "",
-    // "直近3件から選ぶ" — a fixed-size (see MediaProbe.RECENT_POSTS_LIMIT) list
-    // of an account's newest posts to hand-pick from, never the full history.
-    val recentPosts: List<ProfilePostCandidate>? = null,
-    val recentPostsSelected: Set<Int> = emptySet()
-)
+/** One entry in a profile's "recent posts" pick-list — see [MediaProbe.probeRecentPosts]. */
+data class ProfilePostCandidate(val index: Int, val title: String, val postUrl: String)
 
-class BrowserViewModel : ViewModel() {
+/**
+ * Asks yt-dlp what is at a URL *without downloading anything*, so the browser
+ * screen can show a pick-list when a single post/story contains several
+ * media items (an Instagram carousel, for example).
+ */
+object MediaProbe {
 
-    private val _state = MutableStateFlow(BrowserUiState())
-    val state: StateFlow<BrowserUiState> = _state
+    // Hard cap for probeRecentPosts() — deliberately a fixed, small constant
+    // rather than a caller-supplied value, so this can never be turned into
+    // an account-wide listing just by passing a bigger number in. Not
+    // private so BrowserScreen.kt's button label can read it directly and
+    // never drift out of sync with the actual cap.
+    const val RECENT_POSTS_LIMIT = 3
 
-    fun openSite(site: SnsSite) {
-        _state.update { it.copy(currentSite = site, currentUrl = site.homeUrl) }
-    }
-
-    fun goHome() {
-        _state.update { it.copy(currentSite = null, currentUrl = "") }
-    }
-
-    fun onPageUrlChanged(url: String) {
-        _state.update { it.copy(currentUrl = url) }
-    }
-
-    /** Called from the browser's "この投稿を保存" button, on a post/story page. */
-    fun requestDownload(context: Context) {
-        val url = _state.value.currentUrl
-        if (url.isBlank()) return
-
-        _state.update { it.copy(isProbing = true) }
-        viewModelScope.launch { probeAndPresent(context, url, "ダウンロードを開始しました") }
-    }
-
-    /**
-     * Called from the "最新の投稿を保存" button shown instead, when the WebView
-     * is sitting on a profile/account page rather than a specific post. This
-     * only ever resolves and downloads that account's single newest post —
-     * never the rest of their history — matching the same one-post-at-a-time
-     * rule as [requestDownload].
-     */
-    fun requestDownloadLatestPost(context: Context) {
-        val s = _state.value
-        val site = s.currentSite ?: return
-        val profileUrl = s.currentUrl
-        if (profileUrl.isBlank()) return
-
-        _state.update { it.copy(isProbing = true) }
-        viewModelScope.launch {
-            MediaProbe.resolveLatestPostUrl(site, profileUrl)
-                .onFailure { e ->
-                    _state.update { it.copy(isProbing = false) }
-                    Toast.makeText(context, "最新の投稿を特定できませんでした: ${e.message}", Toast.LENGTH_SHORT).show()
-                }
-                .onSuccess { postUrl ->
-                    probeAndPresent(context, postUrl, "最新の投稿のダウンロードを開始しました")
-                }
-        }
-    }
-
-    /**
-     * Called from the "直近3件から選ぶ" button on a profile page. Lists only the
-     * account's newest handful of posts (hard-capped inside
-     * [MediaProbe.probeRecentPosts], not configurable from here) and shows
-     * them as a pick-list; confirming downloads only the chosen ones, in
-     * full — this never reads or downloads anything beyond that short list.
-     */
-    fun requestRecentPosts(context: Context) {
-        val s = _state.value
-        val site = s.currentSite ?: return
-        val profileUrl = s.currentUrl
-        if (profileUrl.isBlank()) return
-
-        _state.update { it.copy(isProbing = true) }
-        viewModelScope.launch {
-            MediaProbe.probeRecentPosts(site, profileUrl)
-                .onFailure { e ->
-                    _state.update { it.copy(isProbing = false) }
-                    Toast.makeText(context, "投稿一覧を取得できませんでした: ${e.message}", Toast.LENGTH_SHORT).show()
-                }
-                .onSuccess { candidates ->
-                    _state.update {
-                        it.copy(
-                            isProbing = false,
-                            recentPosts = candidates,
-                            recentPostsSelected = candidates.map { c -> c.index }.toSet()
-                        )
-                    }
-                }
-        }
-    }
-
-    fun toggleRecentPostSelected(index: Int) {
-        _state.update { s ->
-            val newSet = if (index in s.recentPostsSelected) s.recentPostsSelected - index else s.recentPostsSelected + index
-            s.copy(recentPostsSelected = newSet)
-        }
-    }
-
-    fun selectAllRecentPosts() {
-        _state.update { s -> s.copy(recentPostsSelected = s.recentPosts.orEmpty().map { it.index }.toSet()) }
-    }
-
-    fun clearRecentPostsSelection() {
-        _state.update { it.copy(recentPostsSelected = emptySet()) }
-    }
-
-    fun dismissRecentPosts() {
-        _state.update { it.copy(recentPosts = null, recentPostsSelected = emptySet()) }
-    }
-
-    fun confirmRecentPostsDownload(context: Context) {
-        val s = _state.value
-        val candidates = s.recentPosts ?: return
-        val chosen = candidates.filter { it.index in s.recentPostsSelected }
-        if (chosen.isEmpty()) return
-
-        // Each chosen post downloads in full (same as pasting its link directly
-        // into "リンクで取得") — no further per-post carousel sub-selection here,
-        // to keep this already-narrow picker simple.
-        chosen.forEach { candidate -> DownloadActions.submit(context, candidate.postUrl) }
-        Toast.makeText(context, "ダウンロードを開始しました（${chosen.size}件）", Toast.LENGTH_SHORT).show()
-        dismissRecentPosts()
-    }
-
-    private suspend fun probeAndPresent(context: Context, url: String, successMessage: String) {
-        when (val result = MediaProbe.probe(url)) {
-            is ProbeResult.Failure -> {
-                _state.update { it.copy(isProbing = false) }
-                Toast.makeText(context, "内容を確認できませんでした: ${result.message}", Toast.LENGTH_SHORT).show()
+    suspend fun probe(context: Context, url: String): ProbeResult = withContext(Dispatchers.IO) {
+        try {
+            val request = YoutubeDLRequest(url).apply {
+                addOption("--dump-single-json")
+                addOption("--flat-playlist")
+                addOption("--skip-download")
+                addOption("--no-warnings")
+                addOption("--no-playlist")
+                applyCookies(context, url)
             }
-            is ProbeResult.Success -> {
-                if (result.entries.size <= 1) {
-                    // Single item: nothing to choose from, just download it.
-                    DownloadActions.submit(context, url)
-                    _state.update { it.copy(isProbing = false) }
-                    Toast.makeText(context, successMessage, Toast.LENGTH_SHORT).show()
+            val response = YoutubeDL.getInstance().execute(request)
+            val root = JSONObject(response.out.trim().lineSequence().lastOrNull { it.isNotBlank() } ?: response.out)
+
+            val entries = mutableListOf<MediaEntry>()
+            if (root.has("entries")) {
+                val arr = root.getJSONArray("entries")
+                for (i in 0 until arr.length()) {
+                    val entry = arr.optJSONObject(i) ?: continue
+                    val title = entry.optString("title").ifBlank {
+                        entry.optString("id").ifBlank { "メディア ${i + 1}" }
+                    }
+                    entries.add(MediaEntry(index = i + 1, title = title))
+                }
+            } else {
+                val title = root.optString("title").ifBlank { url }
+                entries.add(MediaEntry(index = 1, title = title))
+            }
+
+            if (entries.isEmpty()) {
+                ProbeResult.Failure("メディアが見つかりませんでした")
+            } else {
+                ProbeResult.Success(entries)
+            }
+        } catch (e: Exception) {
+            ProbeResult.Failure(e.message ?: "内容の確認に失敗しました")
+        }
+    }
+
+    /**
+     * Given a *profile* page URL, finds the permalink of just that account's
+     * single newest post — never anything more. Internally this asks yt-dlp
+     * for only playlist item #1 of the profile's post feed (--playlist-items 1),
+     * so it never enumerates or fetches the rest of the account's history;
+     * the result feeds straight back into [probe]/[DownloadActions.submit]
+     * exactly as if the user had opened and shared that one post directly.
+     */
+    suspend fun resolveLatestPostUrl(context: Context, site: SnsSite, profileUrl: String): Result<String> =
+        withContext(Dispatchers.IO) {
+            try {
+                val request = YoutubeDLRequest(profileUrl).apply {
+                    addOption("--dump-single-json")
+                    addOption("--flat-playlist")
+                    addOption("--skip-download")
+                    addOption("--no-warnings")
+                    addOption("--playlist-items", "1")
+                    applyCookies(context, profileUrl)
+                }
+                val response = YoutubeDL.getInstance().execute(request)
+                val root = JSONObject(response.out.trim().lineSequence().lastOrNull { it.isNotBlank() } ?: response.out)
+
+                val firstEntry: JSONObject? = if (root.has("entries")) {
+                    val arr = root.getJSONArray("entries")
+                    if (arr.length() > 0) arr.optJSONObject(0) else null
                 } else {
-                    _state.update {
-                        it.copy(
-                            isProbing = false,
-                            pickerEntries = result.entries,
-                            pickerSelected = result.entries.map { e -> e.index }.toSet(),
-                            pickerSourceUrl = url
-                        )
-                    }
+                    root
                 }
+
+                if (firstEntry == null) {
+                    return@withContext Result.failure(IllegalStateException("投稿が見つかりませんでした"))
+                }
+
+                val resolvedUrl = resolveEntryUrl(site, firstEntry)
+                if (resolvedUrl.isBlank()) {
+                    Result.failure(IllegalStateException("投稿のURLを特定できませんでした"))
+                } else {
+                    Result.success(resolvedUrl)
+                }
+            } catch (e: Exception) {
+                Result.failure(e)
+            }
+        }
+
+    /**
+     * Given a *profile* page URL, lists just that account's [RECENT_POSTS_LIMIT]
+     * newest posts (never more — the cap is a fixed constant, not a parameter
+     * callers can widen) so the user can hand-pick which of those few to save.
+     * Confirming the resulting picker downloads each chosen post in full,
+     * exactly as if it had been opened and saved individually — this never
+     * reads or downloads anything from the account beyond this short list.
+     */
+    suspend fun probeRecentPosts(context: Context, site: SnsSite, profileUrl: String): Result<List<ProfilePostCandidate>> =
+        withContext(Dispatchers.IO) {
+            try {
+                val request = YoutubeDLRequest(profileUrl).apply {
+                    addOption("--dump-single-json")
+                    addOption("--flat-playlist")
+                    addOption("--skip-download")
+                    addOption("--no-warnings")
+                    addOption("--playlist-items", "1-$RECENT_POSTS_LIMIT")
+                    applyCookies(context, profileUrl)
+                }
+                val response = YoutubeDL.getInstance().execute(request)
+                val root = JSONObject(response.out.trim().lineSequence().lastOrNull { it.isNotBlank() } ?: response.out)
+
+                val rawEntries: List<JSONObject> = if (root.has("entries")) {
+                    val arr = root.getJSONArray("entries")
+                    (0 until arr.length()).mapNotNull { arr.optJSONObject(it) }
+                } else {
+                    listOf(root)
+                }
+
+                val candidates = rawEntries
+                    .take(RECENT_POSTS_LIMIT)
+                    .mapIndexedNotNull { i, entry ->
+                        val postUrl = resolveEntryUrl(site, entry)
+                        if (postUrl.isBlank()) return@mapIndexedNotNull null
+                        val title = entry.optString("title").ifBlank {
+                            entry.optString("description").ifBlank {
+                                entry.optString("id").ifBlank { "投稿 ${i + 1}" }
+                            }
+                        }
+                        ProfilePostCandidate(index = i + 1, title = title, postUrl = postUrl)
+                    }
+
+                if (candidates.isEmpty()) {
+                    Result.failure(IllegalStateException("投稿が見つかりませんでした"))
+                } else {
+                    Result.success(candidates)
+                }
+            } catch (e: Exception) {
+                Result.failure(e)
+            }
+        }
+
+    // yt-dlp runs as a separate process with no knowledge of the in-app
+    // browser's login session by default — this is what made "ログインでき
+    // ているのにダウンロードできない" happen. Exporting the WebView's cookies
+    // for this URL and pointing yt-dlp at them makes every probe/download use
+    // the same authenticated session the user is actually looking at.
+    private fun YoutubeDLRequest.applyCookies(context: Context, url: String) {
+        val cookieFile = CookieExporter.exportForUrl(context, url) ?: return
+        addOption("--cookies", cookieFile.absolutePath)
+    }
+
+    private fun resolveEntryUrl(site: SnsSite, entry: JSONObject): String {
+        val candidate = entry.optString("webpage_url").ifBlank { entry.optString("url") }
+        return when {
+            candidate.startsWith("http") -> candidate
+            else -> {
+                val id = candidate.ifBlank { entry.optString("id") }
+                if (id.isBlank()) "" else buildPostUrl(site, id)
             }
         }
     }
 
-    fun toggleSelected(index: Int) {
-        _state.update { s ->
-            val newSet = if (index in s.pickerSelected) s.pickerSelected - index else s.pickerSelected + index
-            s.copy(pickerSelected = newSet)
-        }
-    }
-
-    fun selectAll() {
-        _state.update { s -> s.copy(pickerSelected = s.pickerEntries.orEmpty().map { it.index }.toSet()) }
-    }
-
-    fun clearSelection() {
-        _state.update { it.copy(pickerSelected = emptySet()) }
-    }
-
-    fun dismissPicker() {
-        _state.update { it.copy(pickerEntries = null, pickerSelected = emptySet(), pickerSourceUrl = "") }
-    }
-
-    fun confirmPickerDownload(context: Context) {
-        val s = _state.value
-        val entries = s.pickerEntries ?: return
-        if (s.pickerSelected.isEmpty()) return
-
-        val playlistItems = if (s.pickerSelected.size == entries.size) {
-            null // everything selected — no need to filter
-        } else {
-            s.pickerSelected.sorted().joinToString(",")
-        }
-
-        DownloadActions.submit(context, s.pickerSourceUrl, playlistItems = playlistItems)
-        Toast.makeText(context, "ダウンロードを開始しました（${s.pickerSelected.size}件）", Toast.LENGTH_SHORT).show()
-        dismissPicker()
+    private fun buildPostUrl(site: SnsSite, id: String): String = when (site) {
+        SnsSite.INSTAGRAM -> "https://www.instagram.com/p/$id/"
+        SnsSite.YOUTUBE -> "https://www.youtube.com/watch?v=$id"
+        // x.com/i/status/<id> resolves without needing the author's handle.
+        SnsSite.X -> "https://x.com/i/status/$id"
+        // TikTok/Threads permalinks require the author's handle, which a bare
+        // id doesn't give us — safer to report "not found" than guess wrong.
+        SnsSite.TIKTOK, SnsSite.THREADS -> ""
     }
 }
