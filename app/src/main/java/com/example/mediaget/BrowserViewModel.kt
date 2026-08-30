@@ -18,6 +18,23 @@ enum class SnsSite(val displayName: String, val homeUrl: String) {
     THREADS("Threads", "https://www.threads.com/")
 }
 
+/**
+ * Which User-Agent identity the in-app browser presents as. MOBILE is a
+ * normal phone Chrome UA (needed so TikTok/X don't gate their mobile-web
+ * experience); TABLET drops the "Mobile" token so sites render their
+ * touch-friendly-but-full layout instead of the gated phone-web one — this
+ * is what unblocks Instagram's login screen; DESKTOP presents as Chrome on
+ * Windows for sites the user wants to browse in full PC layout. Switching
+ * modes only ever changes the UA string + viewport flags — no JS is
+ * injected to reshape the page, since that's what caused the earlier
+ * scroll/caret/white-screen bugs.
+ */
+enum class DisplayMode(val label: String) {
+    MOBILE("モバイル表示"),
+    TABLET("タブレット表示"),
+    DESKTOP("PC表示")
+}
+
 data class BrowserUiState(
     val currentSite: SnsSite? = null,
     val currentUrl: String = "",
@@ -33,7 +50,7 @@ data class BrowserUiState(
     // composable is fully torn down and recreated every time the user leaves
     // and comes back to the "ブラウザ" tab — a plain composable-local toggle
     // was silently resetting to off on every tab switch.
-    val tabletMode: Boolean = false
+    val displayMode: DisplayMode = DisplayMode.MOBILE
 )
 
 class BrowserViewModel : ViewModel() {
@@ -62,8 +79,8 @@ class BrowserViewModel : ViewModel() {
         _state.update { it.copy(currentUrl = url) }
     }
 
-    fun setTabletMode(enabled: Boolean) {
-        _state.update { it.copy(tabletMode = enabled) }
+    fun setDisplayMode(mode: DisplayMode) {
+        _state.update { it.copy(displayMode = mode) }
     }
 
     /** Called from the browser's "この投稿を保存" button, on a post/story page. */
