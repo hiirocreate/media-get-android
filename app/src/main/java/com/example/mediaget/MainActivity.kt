@@ -10,12 +10,16 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -33,13 +37,10 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.NavigationBar
-import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -48,8 +49,10 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import com.example.mediaget.ui.theme.MediaGetTheme
 
@@ -111,6 +114,65 @@ private enum class AppTab(val label: String) {
     LIBRARY("ライブラリ")
 }
 
+private fun iconFor(tab: AppTab): ImageVector = when (tab) {
+    AppTab.LINK -> Icons.Filled.Link
+    AppTab.BROWSER -> Icons.Filled.Language
+    AppTab.LIBRARY -> Icons.Filled.PhotoLibrary
+}
+
+/**
+ * A slimmer stand-in for Material3's NavigationBar (which reserves ~80dp for
+ * icon+label regardless of content). The "ブラウザ" tab's WebView area was
+ * reported as too cramped once its own top/bottom chrome stopped floating
+ * over the page and started reserving real space — shrinking this shared bar
+ * to ~48dp gives that space back on every tab, not just ブラウザ.
+ */
+@Composable
+private fun CompactBottomNavBar(current: AppTab, onSelect: (AppTab) -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(48.dp)
+            .background(MaterialTheme.colorScheme.surfaceVariant),
+        horizontalArrangement = Arrangement.SpaceEvenly
+    ) {
+        AppTab.values().forEach { t ->
+            val selected = t == current
+            val tint = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+            Column(
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxHeight()
+                    .clickable { onSelect(t) },
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center
+            ) {
+                Icon(
+                    imageVector = iconFor(t),
+                    contentDescription = t.label,
+                    tint = tint,
+                    modifier = Modifier.size(18.dp)
+                )
+                Text(text = t.label, color = tint, fontSize = 10.sp, maxLines = 1)
+            }
+        }
+    }
+}
+
+@Composable
+private fun CompactTopBar(title: String, actions: @Composable RowScope.() -> Unit = {}) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(44.dp)
+            .padding(horizontal = 12.dp)
+    ) {
+        Text(text = title, style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
+        actions()
+    }
+}
+
 @Composable
 fun MediaGetApp(
     mainViewModel: MainViewModel,
@@ -121,28 +183,7 @@ fun MediaGetApp(
     var tab by rememberSaveable { mutableStateOf(AppTab.LINK) }
 
     Scaffold(
-        bottomBar = {
-            NavigationBar {
-                NavigationBarItem(
-                    selected = tab == AppTab.LINK,
-                    onClick = { tab = AppTab.LINK },
-                    icon = { Icon(Icons.Filled.Link, contentDescription = null) },
-                    label = { Text(AppTab.LINK.label) }
-                )
-                NavigationBarItem(
-                    selected = tab == AppTab.BROWSER,
-                    onClick = { tab = AppTab.BROWSER },
-                    icon = { Icon(Icons.Filled.Language, contentDescription = null) },
-                    label = { Text(AppTab.BROWSER.label) }
-                )
-                NavigationBarItem(
-                    selected = tab == AppTab.LIBRARY,
-                    onClick = { tab = AppTab.LIBRARY },
-                    icon = { Icon(Icons.Filled.PhotoLibrary, contentDescription = null) },
-                    label = { Text(AppTab.LIBRARY.label) }
-                )
-            }
-        }
+        bottomBar = { CompactBottomNavBar(current = tab, onSelect = { tab = it }) }
     ) { padding ->
         Column(modifier = Modifier.fillMaxSize().padding(padding)) {
             when (tab) {
@@ -163,17 +204,14 @@ fun DownloadScreen(viewModel: MainViewModel, initialUrl: String) {
     var compressImages by rememberSaveable { mutableStateOf(true) }
     val context = androidx.compose.ui.platform.LocalContext.current
 
-    Scaffold(
-        topBar = {
-            TopAppBar(title = { Text(stringResourceAppName()) })
-        }
-    ) { padding ->
+    Column(modifier = Modifier.fillMaxSize()) {
+        CompactTopBar(title = stringResourceAppName())
+
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(padding)
-                .padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
+                .padding(horizontal = 12.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             OutlinedTextField(
                 value = url,
