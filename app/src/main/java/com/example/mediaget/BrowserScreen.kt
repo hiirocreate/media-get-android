@@ -352,6 +352,23 @@ fun BrowserScreen(viewModel: BrowserViewModel) {
                                         }
                                     }
 
+                                    // Instagram/X/TikTok are single-page apps: after the very
+                                    // first full load, tapping into a profile or a post updates
+                                    // the address bar via history.pushState() instead of doing a
+                                    // real navigation — so onPageFinished() above never fires
+                                    // again, and the app kept thinking the current page was
+                                    // whatever URL first loaded (e.g. still the home feed). That
+                                    // stale URL is exactly why a profile page sometimes showed
+                                    // the single-post "保存" button instead of the profile
+                                    // buttons, and why probing it failed with
+                                    // "内容を確認できませんでした". doUpdateVisitedHistory() is
+                                    // WebView's hook for these history-only URL changes, so this
+                                    // keeps the current-page URL accurate for SPA navigation too.
+                                    override fun doUpdateVisitedHistory(view: WebView, url: String, isReload: Boolean) {
+                                        super.doUpdateVisitedHistory(view, url, isReload)
+                                        viewModel.onPageUrlChanged(url)
+                                    }
+
                                     // TikTok (and some other sites) try to bounce the browser
                                     // straight to a custom app-deep-link scheme (tiktok://,
                                     // intent://, etc.) as their "open in app" mechanism. A plain
