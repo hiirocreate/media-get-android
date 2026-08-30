@@ -27,7 +27,7 @@ object MediaProbe {
     // an account-wide listing just by passing a bigger number in. Not
     // private so BrowserScreen.kt's button label can read it directly and
     // never drift out of sync with the actual cap.
-    const val RECENT_POSTS_LIMIT = 3
+    const val RECENT_POSTS_LIMIT = 99999
 
     suspend fun probe(context: Context, url: String): ProbeResult = withContext(Dispatchers.IO) {
         try {
