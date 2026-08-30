@@ -12,8 +12,10 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -22,21 +24,24 @@ import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.GetApp
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.List
+import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.ExtendedFloatingActionButton
-import androidx.compose.material3.FilterChip
+import androidx.compose.material3.Divider
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -73,9 +78,9 @@ private const val MOBILE_CHROME_USER_AGENT =
 /**
  * Same idea as before (no "Mobile" token, so sites treat this as a tablet-
  * class touch browser rather than the phone-web experience they gate), but
- * the device name now matches the actual phone this app runs on (OUKITEL
- * C50) instead of a made-up Samsung tablet model. A UA claiming a device
- * that doesn't match the real hardware is itself one more signal a site's
+ * the device name matches the actual phone this app runs on (OUKITEL C50)
+ * instead of a made-up Samsung tablet model. A UA claiming a device that
+ * doesn't match the real hardware is itself one more signal a site's
  * fraud/device-recognition system can use to flag "unrecognized device" —
  * this narrows that gap while keeping the non-"Mobile" trick that gets the
  * login screen to render at all.
@@ -84,13 +89,30 @@ private const val TABLET_CHROME_USER_AGENT =
     "Mozilla/5.0 (Linux; Android 14; OUKITEL C50) AppleWebKit/537.36 " +
         "(KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
 
-/** Applies the phone/tablet presentation to this WebView. Returns true if anything changed. */
-private fun WebView.applyDisplayMode(tabletMode: Boolean): Boolean {
-    val desiredUa = if (tabletMode) TABLET_CHROME_USER_AGENT else MOBILE_CHROME_USER_AGENT
+/**
+ * A plain desktop-Chrome-on-Windows UA, offered as a manual option for sites
+ * the user wants to browse in full PC layout. Unlike the earlier desktop-UA
+ * attempt, switching to this never injects any reflow/caret-fix JavaScript —
+ * that JS (not the UA itself) is what caused the scroll/white-screen bugs —
+ * so this is just the UA string plus the same wide-viewport flags used for
+ * tablet mode.
+ */
+private const val DESKTOP_CHROME_USER_AGENT =
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
+        "(KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
+
+/** Applies the chosen UA/viewport presentation to this WebView. Returns true if anything changed. */
+private fun WebView.applyDisplayMode(mode: DisplayMode): Boolean {
+    val desiredUa = when (mode) {
+        DisplayMode.MOBILE -> MOBILE_CHROME_USER_AGENT
+        DisplayMode.TABLET -> TABLET_CHROME_USER_AGENT
+        DisplayMode.DESKTOP -> DESKTOP_CHROME_USER_AGENT
+    }
     val changed = settings.userAgentString != desiredUa
     settings.userAgentString = desiredUa
     // Lets WebView honor whatever <meta name="viewport"> each site ships on
-    // its own tablet layout — we no longer inject or override one ourselves.
+    // its own tablet/desktop layout — we no longer inject or override one
+    // ourselves.
     settings.useWideViewPort = true
     settings.loadWithOverviewMode = true
     return changed
@@ -184,7 +206,7 @@ fun BrowserScreen(viewModel: BrowserViewModel) {
     val state by viewModel.state.collectAsState()
     val context = LocalContext.current
     var webViewRef by remember { mutableStateOf<WebView?>(null) }
-    val tabletMode = state.tabletMode
+    val displayMode = state.displayMode
 
     BackHandler(enabled = state.currentSite != null) {
         val wv = webViewRef
@@ -211,200 +233,259 @@ fun BrowserScreen(viewModel: BrowserViewModel) {
         if (site == null) {
             BrowserHome(onSelect = { viewModel.openSite(it) })
         } else {
-            // The WebView fills the *entire* screen here (not squeezed between a
-            // top bar row and a bottom bar row) so sites that size themselves off
-            // the real viewport height — Instagram Stories being the clearest
-            // example — get accurate full-screen math instead of being crushed
-            // into whatever was left over. All of MediaGet's own chrome (top
-            // bar, save button(s), SNS switcher) floats on top as translucent
-            // overlays instead of reserving its own dedicated space.
-            Box(modifier = Modifier.fillMaxSize()) {
-                AndroidView(
-                    modifier = Modifier.fillMaxSize(),
-                    factory = { ctx ->
-                        WebView(ctx).apply {
-                            settings.javaScriptEnabled = true
-                            settings.domStorageEnabled = true
-                            settings.setSupportMultipleWindows(true)
-                            settings.javaScriptCanOpenWindowsAutomatically = true
-                            settings.setSupportZoom(true)
-                            settings.builtInZoomControls = true
-                            settings.displayZoomControls = false
-                            CookieManager.getInstance().setAcceptCookie(true)
-                            CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
-                            webViewClient = object : WebViewClient() {
-                                override fun onPageFinished(view: WebView?, url: String?) {
-                                    super.onPageFinished(view, url)
-                                    if (url != null) viewModel.onPageUrlChanged(url)
-                                    if (url != null && url.contains("tiktok.com")) {
-                                        view?.evaluateJavascript(TIKTOK_HIDE_APP_BANNER_JS, null)
-                                    }
-                                }
+            // The browser itself now lives in a dedicated, empty middle region:
+            // MediaGet's own chrome (top bar, save button(s)) reserves its own
+            // space above/below instead of floating on top of the page, so
+            // nothing the app draws can ever sit on top of the SNS's own
+            // buttons/inputs and block them.
+            Column(modifier = Modifier.fillMaxSize()) {
+                val onProfilePage = remember(state.currentUrl, site) { isProfileUrl(site, state.currentUrl) }
+                var menuExpanded by remember { mutableStateOf(false) }
 
-                                // TikTok (and some other sites) try to bounce the browser
-                                // straight to a custom app-deep-link scheme (tiktok://,
-                                // intent://, etc.) as their "open in app" mechanism. A plain
-                                // WebView tries to actually navigate to that scheme and fails
-                                // with net::ERR_UNKNOWN_URL_SCHEME, blanking the whole page —
-                                // this just ignores anything that isn't a normal web address
-                                // instead, so the page underneath keeps loading normally.
-                                override fun shouldOverrideUrlLoading(
-                                    view: WebView,
-                                    request: android.webkit.WebResourceRequest
-                                ): Boolean {
-                                    val scheme = request.url.scheme?.lowercase()
-                                    return scheme != "http" && scheme != "https"
-                                }
-                            }
-                            // Login flows (Google/Apple sign-in popups, etc.) often open
-                            // via window.open() / target="_blank". A plain WebView drops
-                            // those silently, so route the popup's URL back into this
-                            // same WebView instead of losing it.
-                            webChromeClient = object : WebChromeClient() {
-                                override fun onCreateWindow(
-                                    view: WebView,
-                                    isDialog: Boolean,
-                                    isUserGesture: Boolean,
-                                    resultMsg: android.os.Message
-                                ): Boolean {
-                                    val popupWebView = WebView(view.context)
-                                    popupWebView.webViewClient = object : WebViewClient() {
-                                        override fun shouldOverrideUrlLoading(
-                                            popupView: WebView,
-                                            request: android.webkit.WebResourceRequest
-                                        ): Boolean {
-                                            view.loadUrl(request.url.toString())
-                                            return true
-                                        }
-                                    }
-                                    val transport = resultMsg.obj as WebView.WebViewTransport
-                                    transport.webView = popupWebView
-                                    resultMsg.sendToTarget()
-                                    return true
-                                }
-                            }
-                            // TikTok/X/Threads detect the default WebView UA as an
-                            // "in-app browser" and respond by disabling scrolling,
-                            // gating features, or nagging to open their own app;
-                            // Instagram/TikTok's login also often refuses to render
-                            // at all in mobile-phone-web mode. applyDisplayMode() picks
-                            // the phone- or tablet-Chrome UA per the toggle above.
-                            applyDisplayMode(tabletMode)
-                            val saved = viewModel.savedWebViewState
-                            if (saved != null) {
-                                restoreState(saved)
-                                viewModel.savedWebViewState = null
-                            } else {
-                                loadUrl(site.homeUrl)
-                            }
-                            webViewRef = this
-                        }
-                    },
-                    update = { webView ->
-                        webViewRef = webView
-                        if (webView.applyDisplayMode(tabletMode)) {
-                            webView.reload()
-                        }
-                    }
-                )
-
+                // Compact top bar: navigation + a single hamburger menu that
+                // holds both "switch SNS" and "display mode" — replaces the
+                // old always-visible row of 5 SNS icons and the separate
+                // tablet-mode chip, so this row stays a single thin strip.
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                     modifier = Modifier
-                        .align(Alignment.TopCenter)
                         .fillMaxWidth()
-                        .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.94f))
-                        .padding(horizontal = 4.dp, vertical = 4.dp)
+                        .height(44.dp)
+                        .background(MaterialTheme.colorScheme.surfaceVariant)
+                        .padding(horizontal = 2.dp)
                 ) {
-                    IconButton(onClick = { viewModel.goHome() }) {
-                        Icon(Icons.Filled.Home, contentDescription = "ホーム")
+                    IconButton(onClick = { viewModel.goHome() }, modifier = Modifier.size(40.dp)) {
+                        Icon(Icons.Filled.Home, contentDescription = "ホーム", modifier = Modifier.size(20.dp))
                     }
-                    IconButton(onClick = { webViewRef?.let { if (it.canGoBack()) it.goBack() } }) {
-                        Icon(Icons.Filled.ArrowBack, contentDescription = "戻る")
+                    IconButton(
+                        onClick = { webViewRef?.let { if (it.canGoBack()) it.goBack() } },
+                        modifier = Modifier.size(40.dp)
+                    ) {
+                        Icon(Icons.Filled.ArrowBack, contentDescription = "戻る", modifier = Modifier.size(20.dp))
                     }
                     // Some flows (e.g. Instagram's "承認してください" other-device
                     // approval) update on the server side but don't push that
                     // change back into an already-open page — reloading is the
                     // manual way to pick up the new state without navigating away.
-                    IconButton(onClick = { webViewRef?.reload() }) {
-                        Icon(Icons.Filled.Refresh, contentDescription = "更新")
+                    IconButton(onClick = { webViewRef?.reload() }, modifier = Modifier.size(40.dp)) {
+                        Icon(Icons.Filled.Refresh, contentDescription = "更新", modifier = Modifier.size(20.dp))
                     }
+                    SnsGlyph(site, size = 18.dp, modifier = Modifier.padding(start = 4.dp))
                     Text(
                         text = site.displayName,
-                        modifier = Modifier.weight(1f),
+                        modifier = Modifier.weight(1f).padding(start = 6.dp),
                         maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
+                        overflow = TextOverflow.Ellipsis,
+                        style = MaterialTheme.typography.bodyMedium
                     )
-                    FilterChip(
-                        selected = tabletMode,
-                        onClick = { viewModel.setTabletMode(!tabletMode) },
-                        label = { Text("タブレット表示") }
-                    )
+                    Box {
+                        IconButton(onClick = { menuExpanded = true }, modifier = Modifier.size(40.dp)) {
+                            Icon(Icons.Filled.Menu, contentDescription = "メニュー", modifier = Modifier.size(20.dp))
+                        }
+                        DropdownMenu(expanded = menuExpanded, onDismissRequest = { menuExpanded = false }) {
+                            Text(
+                                "SNSを切り替え",
+                                style = MaterialTheme.typography.labelMedium,
+                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
+                            )
+                            SnsSite.values().forEach { candidate ->
+                                DropdownMenuItem(
+                                    leadingIcon = { SnsGlyph(candidate, size = 18.dp) },
+                                    trailingIcon = {
+                                        if (candidate == site) Icon(Icons.Filled.Check, contentDescription = null)
+                                    },
+                                    text = { Text(candidate.displayName) },
+                                    onClick = {
+                                        menuExpanded = false
+                                        viewModel.openSite(candidate)
+                                        webViewRef?.loadUrl(candidate.homeUrl)
+                                    }
+                                )
+                            }
+                            Divider()
+                            Text(
+                                "表示モード",
+                                style = MaterialTheme.typography.labelMedium,
+                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
+                            )
+                            DisplayMode.values().forEach { mode ->
+                                DropdownMenuItem(
+                                    trailingIcon = {
+                                        if (mode == displayMode) Icon(Icons.Filled.Check, contentDescription = null)
+                                    },
+                                    text = { Text(mode.label) },
+                                    onClick = {
+                                        menuExpanded = false
+                                        viewModel.setDisplayMode(mode)
+                                    }
+                                )
+                            }
+                        }
+                    }
                 }
 
-                val onProfilePage = remember(state.currentUrl, site) { isProfileUrl(site, state.currentUrl) }
-                // Extra bottom padding here clears the SNS switcher bar docked at
-                // the very bottom, so the save button(s) never sit on top of it.
-                val fabBottomPadding = 64.dp
+                // The WebView fills every pixel left over between the top and
+                // bottom bars — a real blank region with nothing drawn over it,
+                // so sites that size themselves off the viewport (Instagram
+                // Stories, for example) get accurate math for the space they
+                // actually have.
+                Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
+                    AndroidView(
+                        modifier = Modifier.fillMaxSize(),
+                        factory = { ctx ->
+                            WebView(ctx).apply {
+                                settings.javaScriptEnabled = true
+                                settings.domStorageEnabled = true
+                                settings.setSupportMultipleWindows(true)
+                                settings.javaScriptCanOpenWindowsAutomatically = true
+                                settings.setSupportZoom(true)
+                                settings.builtInZoomControls = true
+                                settings.displayZoomControls = false
+                                CookieManager.getInstance().setAcceptCookie(true)
+                                CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
+                                webViewClient = object : WebViewClient() {
+                                    override fun onPageFinished(view: WebView?, url: String?) {
+                                        super.onPageFinished(view, url)
+                                        if (url != null) viewModel.onPageUrlChanged(url)
+                                        if (url != null && url.contains("tiktok.com")) {
+                                            view?.evaluateJavascript(TIKTOK_HIDE_APP_BANNER_JS, null)
+                                        }
+                                    }
 
-                if (onProfilePage) {
-                    // Two bounded options — the single newest post, or a hand-pick
-                    // from just the newest few — never a "get everything" button.
-                    Column(
-                        horizontalAlignment = Alignment.End,
-                        verticalArrangement = Arrangement.spacedBy(8.dp),
-                        modifier = Modifier
-                            .align(Alignment.BottomEnd)
-                            .padding(end = 16.dp, top = 16.dp, bottom = fabBottomPadding)
-                    ) {
-                        ExtendedFloatingActionButton(
-                            onClick = { viewModel.requestRecentPosts(context) },
-                            icon = {
-                                if (state.isProbing) {
-                                    CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
-                                } else {
-                                    Icon(Icons.Filled.List, contentDescription = null)
+                                    // TikTok (and some other sites) try to bounce the browser
+                                    // straight to a custom app-deep-link scheme (tiktok://,
+                                    // intent://, etc.) as their "open in app" mechanism. A plain
+                                    // WebView tries to actually navigate to that scheme and fails
+                                    // with net::ERR_UNKNOWN_URL_SCHEME, blanking the whole page —
+                                    // this just ignores anything that isn't a normal web address
+                                    // instead, so the page underneath keeps loading normally.
+                                    override fun shouldOverrideUrlLoading(
+                                        view: WebView,
+                                        request: android.webkit.WebResourceRequest
+                                    ): Boolean {
+                                        val scheme = request.url.scheme?.lowercase()
+                                        return scheme != "http" && scheme != "https"
+                                    }
                                 }
-                            },
-                            text = { Text("直近${MediaProbe.RECENT_POSTS_LIMIT}件から選ぶ") }
-                        )
-                        ExtendedFloatingActionButton(
-                            onClick = { viewModel.requestDownloadLatestPost(context) },
-                            icon = {
-                                if (state.isProbing) {
-                                    CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
-                                } else {
-                                    Icon(Icons.Filled.GetApp, contentDescription = null)
+                                // Login flows (Google/Apple sign-in popups, etc.) often open
+                                // via window.open() / target="_blank". A plain WebView drops
+                                // those silently, so route the popup's URL back into this
+                                // same WebView instead of losing it.
+                                webChromeClient = object : WebChromeClient() {
+                                    override fun onCreateWindow(
+                                        view: WebView,
+                                        isDialog: Boolean,
+                                        isUserGesture: Boolean,
+                                        resultMsg: android.os.Message
+                                    ): Boolean {
+                                        val popupWebView = WebView(view.context)
+                                        popupWebView.webViewClient = object : WebViewClient() {
+                                            override fun shouldOverrideUrlLoading(
+                                                popupView: WebView,
+                                                request: android.webkit.WebResourceRequest
+                                            ): Boolean {
+                                                view.loadUrl(request.url.toString())
+                                                return true
+                                            }
+                                        }
+                                        val transport = resultMsg.obj as WebView.WebViewTransport
+                                        transport.webView = popupWebView
+                                        resultMsg.sendToTarget()
+                                        return true
+                                    }
                                 }
-                            },
-                            text = { Text("最新の投稿を保存") }
-                        )
-                    }
-                } else {
-                    ExtendedFloatingActionButton(
-                        onClick = { viewModel.requestDownload(context) },
-                        modifier = Modifier
-                            .align(Alignment.BottomEnd)
-                            .padding(end = 16.dp, bottom = fabBottomPadding),
-                        icon = {
-                            if (state.isProbing) {
-                                CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
-                            } else {
-                                Icon(Icons.Filled.GetApp, contentDescription = null)
+                                // TikTok/X/Threads detect the default WebView UA as an
+                                // "in-app browser" and respond by disabling scrolling,
+                                // gating features, or nagging to open their own app;
+                                // Instagram/TikTok's login also often refuses to render
+                                // at all in mobile-phone-web mode. applyDisplayMode() picks
+                                // the phone/tablet/desktop UA per the menu selection above.
+                                applyDisplayMode(displayMode)
+                                val saved = viewModel.savedWebViewState
+                                if (saved != null) {
+                                    restoreState(saved)
+                                    viewModel.savedWebViewState = null
+                                } else {
+                                    loadUrl(site.homeUrl)
+                                }
+                                webViewRef = this
                             }
                         },
-                        text = { Text("この投稿を保存") }
+                        update = { webView ->
+                            webViewRef = webView
+                            if (webView.applyDisplayMode(displayMode)) {
+                                webView.reload()
+                            }
+                        }
                     )
                 }
 
-                BrowserControlBar(
-                    current = site,
-                    onSelect = { selected ->
-                        viewModel.openSite(selected)
-                        webViewRef?.loadUrl(selected.homeUrl)
-                    },
-                    modifier = Modifier.align(Alignment.BottomCenter)
-                )
+                // Compact bottom action row — fixed, reserved space below the
+                // WebView (never floating on top of it), so it can never end up
+                // sitting over the SNS's own on-page buttons either.
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(52.dp)
+                        .background(MaterialTheme.colorScheme.surfaceVariant)
+                        .padding(horizontal = 6.dp, vertical = 6.dp),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    if (onProfilePage) {
+                        // Two bounded options — the single newest post, or a hand-pick
+                        // from just the newest few — never a "get everything" button.
+                        Button(
+                            onClick = { viewModel.requestRecentPosts(context) },
+                            modifier = Modifier.weight(1f).fillMaxHeight(),
+                            contentPadding = PaddingValues(horizontal = 6.dp),
+                            colors = ButtonDefaults.buttonColors()
+                        ) {
+                            if (state.isProbing) {
+                                CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 2.dp)
+                            } else {
+                                Icon(Icons.Filled.List, contentDescription = null, modifier = Modifier.size(16.dp))
+                            }
+                            Text(
+                                "直近${MediaProbe.RECENT_POSTS_LIMIT}件",
+                                modifier = Modifier.padding(start = 4.dp),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                fontSize = 12.sp
+                            )
+                        }
+                        Button(
+                            onClick = { viewModel.requestDownloadLatestPost(context) },
+                            modifier = Modifier.weight(1f).fillMaxHeight(),
+                            contentPadding = PaddingValues(horizontal = 6.dp)
+                        ) {
+                            if (state.isProbing) {
+                                CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 2.dp)
+                            } else {
+                                Icon(Icons.Filled.GetApp, contentDescription = null, modifier = Modifier.size(16.dp))
+                            }
+                            Text(
+                                "最新の投稿",
+                                modifier = Modifier.padding(start = 4.dp),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                fontSize = 12.sp
+                            )
+                        }
+                    } else {
+                        Button(
+                            onClick = { viewModel.requestDownload(context) },
+                            modifier = Modifier.fillMaxWidth().fillMaxHeight(),
+                            contentPadding = PaddingValues(horizontal = 6.dp)
+                        ) {
+                            if (state.isProbing) {
+                                CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 2.dp)
+                            } else {
+                                Icon(Icons.Filled.GetApp, contentDescription = null, modifier = Modifier.size(16.dp))
+                            }
+                            Text("この投稿を保存", modifier = Modifier.padding(start = 4.dp))
+                        }
+                    }
+                }
             }
         }
 
@@ -468,37 +549,6 @@ private fun BrowserHome(onSelect: (SnsSite) -> Unit) {
                         }
                         Text(site.displayName)
                     }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun BrowserControlBar(current: SnsSite, onSelect: (SnsSite) -> Unit, modifier: Modifier = Modifier) {
-    Row(
-        modifier = modifier
-            .fillMaxWidth()
-            .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.94f))
-            .padding(vertical = 4.dp),
-        horizontalArrangement = Arrangement.SpaceEvenly
-    ) {
-        SnsSite.values().forEach { site ->
-            val isActive = site == current
-            IconButton(onClick = { onSelect(site) }) {
-                Box(
-                    modifier = Modifier
-                        .size(36.dp)
-                        .then(
-                            if (isActive) {
-                                Modifier.background(MaterialTheme.colorScheme.primaryContainer, CircleShape)
-                            } else {
-                                Modifier
-                            }
-                        ),
-                    contentAlignment = Alignment.Center
-                ) {
-                    SnsGlyph(site, size = 22.dp)
                 }
             }
         }
