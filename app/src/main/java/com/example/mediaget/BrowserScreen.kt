@@ -6,6 +6,9 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -56,8 +59,10 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -206,7 +211,6 @@ fun BrowserScreen(viewModel: BrowserViewModel) {
     val state by viewModel.state.collectAsState()
     val context = LocalContext.current
     var webViewRef by remember { mutableStateOf<WebView?>(null) }
-    val displayMode = state.displayMode
 
     BackHandler(enabled = state.currentSite != null) {
         val wv = webViewRef
@@ -241,6 +245,9 @@ fun BrowserScreen(viewModel: BrowserViewModel) {
             Column(modifier = Modifier.fillMaxSize()) {
                 val onProfilePage = remember(state.currentUrl, site) { isProfileUrl(site, state.currentUrl) }
                 var menuExpanded by remember { mutableStateOf(false) }
+                // Per-site — see the comment on BrowserUiState.displayModeBySite
+                // for why this can't be a single shared value.
+                val displayMode = state.displayModeFor(site)
 
                 // Compact top bar: navigation + a single hamburger menu that
                 // holds both "switch SNS" and "display mode" — replaces the
@@ -316,7 +323,7 @@ fun BrowserScreen(viewModel: BrowserViewModel) {
                                     text = { Text(mode.label) },
                                     onClick = {
                                         menuExpanded = false
-                                        viewModel.setDisplayMode(mode)
+                                        viewModel.setDisplayMode(site, mode)
                                     }
                                 )
                             }
@@ -532,6 +539,11 @@ fun BrowserScreen(viewModel: BrowserViewModel) {
                 onDismiss = viewModel::dismissRecentPosts
             )
         }
+
+        val errorMessage = state.errorMessage
+        if (errorMessage != null) {
+            ErrorDialog(message = errorMessage, onDismiss = viewModel::dismissError)
+        }
     }
 }
 
@@ -622,6 +634,40 @@ private fun MediaPickerDialog(
                 Icon(Icons.Filled.Close, contentDescription = null, modifier = Modifier.size(16.dp))
                 Text(" キャンセル")
             }
+        }
+    )
+}
+
+/**
+ * Shows a probe/download failure as a dialog with selectable, copyable text
+ * instead of a Toast — a Toast disappears in ~2 seconds and can't be copied,
+ * which made it impossible to relay yt-dlp's actual error message for
+ * diagnosis. This stays up until dismissed and offers a one-tap copy.
+ */
+@Composable
+private fun ErrorDialog(message: String, onDismiss: () -> Unit) {
+    val clipboard = LocalClipboardManager.current
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("エラー内容") },
+        text = {
+            SelectionContainer {
+                Text(
+                    text = message,
+                    modifier = Modifier
+                        .heightIn(max = 280.dp)
+                        .verticalScroll(rememberScrollState()),
+                    style = MaterialTheme.typography.bodySmall
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = { clipboard.setText(AnnotatedString(message)) }) {
+                Text("コピー")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("閉じる") }
         }
     )
 }
