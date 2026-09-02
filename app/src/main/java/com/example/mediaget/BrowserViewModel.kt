@@ -48,10 +48,23 @@ data class BrowserUiState(
     val recentPostsSelected: Set<Int> = emptySet(),
     // Lives here (not as rememberSaveable inside BrowserScreen) because that
     // composable is fully torn down and recreated every time the user leaves
-    // and comes back to the "ブラウザ" tab — a plain composable-local toggle
+    // and comes back to the "ブラウザ" タブ — a plain composable-local toggle
     // was silently resetting to off on every tab switch.
-    val displayMode: DisplayMode = DisplayMode.MOBILE
-)
+    //
+    // Keyed *per site* rather than a single shared value: TikTok generally
+    // needs MOBILE to avoid its "open in app" gating, while Instagram's login
+    // screen needed TABLET to render at all — sharing one toggle meant
+    // switching to Tablet for Instagram silently broke TikTok (and vice
+    // versa) the next time you switched tabs.
+    val displayModeBySite: Map<SnsSite, DisplayMode> = emptyMap(),
+    // A Toast disappears in ~2 seconds and can't be copied — useless for
+    // relaying yt-dlp's actual error text back for diagnosis. Failures now
+    // land here instead and are shown as a dialog with selectable/copyable
+    // text that stays up until dismissed.
+    val errorMessage: String? = null
+) {
+    fun displayModeFor(site: SnsSite): DisplayMode = displayModeBySite[site] ?: DisplayMode.MOBILE
+}
 
 class BrowserViewModel : ViewModel() {
 
@@ -79,8 +92,12 @@ class BrowserViewModel : ViewModel() {
         _state.update { it.copy(currentUrl = url) }
     }
 
-    fun setDisplayMode(mode: DisplayMode) {
-        _state.update { it.copy(displayMode = mode) }
+    fun setDisplayMode(site: SnsSite, mode: DisplayMode) {
+        _state.update { it.copy(displayModeBySite = it.displayModeBySite + (site to mode)) }
+    }
+
+    fun dismissError() {
+        _state.update { it.copy(errorMessage = null) }
     }
 
     /** Called from the browser's "この投稿を保存" button, on a post/story page. */
@@ -109,8 +126,7 @@ class BrowserViewModel : ViewModel() {
         viewModelScope.launch {
             MediaProbe.resolveLatestPostUrl(context, site, profileUrl)
                 .onFailure { e ->
-                    _state.update { it.copy(isProbing = false) }
-                    Toast.makeText(context, "最新の投稿を特定できませんでした: ${e.message}", Toast.LENGTH_SHORT).show()
+                    _state.update { it.copy(isProbing = false, errorMessage = "最新の投稿を特定できませんでした:\n${e.message}") }
                 }
                 .onSuccess { postUrl ->
                     probeAndPresent(context, postUrl, "最新の投稿のダウンロードを開始しました")
@@ -135,8 +151,7 @@ class BrowserViewModel : ViewModel() {
         viewModelScope.launch {
             MediaProbe.probeRecentPosts(context, site, profileUrl)
                 .onFailure { e ->
-                    _state.update { it.copy(isProbing = false) }
-                    Toast.makeText(context, "投稿一覧を取得できませんでした: ${e.message}", Toast.LENGTH_SHORT).show()
+                    _state.update { it.copy(isProbing = false, errorMessage = "投稿一覧を取得できませんでした:\n${e.message}") }
                 }
                 .onSuccess { candidates ->
                     _state.update {
@@ -186,8 +201,7 @@ class BrowserViewModel : ViewModel() {
     private suspend fun probeAndPresent(context: Context, url: String, successMessage: String) {
         when (val result = MediaProbe.probe(context, url)) {
             is ProbeResult.Failure -> {
-                _state.update { it.copy(isProbing = false) }
-                Toast.makeText(context, "内容を確認できませんでした: ${result.message}", Toast.LENGTH_SHORT).show()
+                _state.update { it.copy(isProbing = false, errorMessage = "内容を確認できませんでした:\n${result.message}") }
             }
             is ProbeResult.Success -> {
                 if (result.entries.size <= 1) {
