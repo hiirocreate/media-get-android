@@ -354,9 +354,18 @@ fun BrowserScreen(viewModel: BrowserViewModel) {
                                     override fun onPageFinished(view: WebView?, url: String?) {
                                         super.onPageFinished(view, url)
                                         if (url != null) viewModel.onPageUrlChanged(url)
-                                        if (url != null && url.contains("tiktok.com")) {
-                                            view?.evaluateJavascript(TIKTOK_HIDE_APP_BANNER_JS, null)
-                                        }
+                                        // Disabled: this guessed-selector CSS (see the constant's
+                                        // comment) hides anything whose class name merely
+                                        // *contains* strings like "Banner" or "download-btn" —
+                                        // broad enough that it could just as easily be matching
+                                        // TikTok's own page/video wrapper elements, not only the
+                                        // app-open nag. That would explain profile AND video pages
+                                        // going fully blank rather than just losing a banner.
+                                        // Leaving this off until it can be verified against the
+                                        // real markup instead of guessed.
+                                        // if (url != null && url.contains("tiktok.com")) {
+                                        //     view?.evaluateJavascript(TIKTOK_HIDE_APP_BANNER_JS, null)
+                                        // }
                                     }
 
                                     // Instagram/X/TikTok are single-page apps: after the very
