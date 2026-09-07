@@ -18,6 +18,8 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.launch
 import java.io.File
+import java.net.HttpURLConnection
+import java.net.URL
 import java.util.concurrent.atomic.AtomicInteger
 
 /**
@@ -93,10 +95,21 @@ class DownloadService : Service() {
         DownloadRepository.update(job.id) { it.copy(status = DownloadStatus.RUNNING) }
         updateSummaryNotification(job.url, 0)
 
+        // Links coming from an SNS app's own "共有" button are very often that
+        // app's own shortened/redirect link (X's t.co, TikTok's vt./vm.tiktok.com)
+        // rather than the canonical page URL — a pasted link can be one too,
+        // since "Copy Link" on some apps hands out the same short form. That
+        // breaks two things at once: yt-dlp's per-site extractors mostly only
+        // recognize the real domain (so a bare t.co link may not match any
+        // extractor at all), and the WebView's login cookies live under the
+        // real domain too (so even a recognized short link looks logged-out).
+        // Resolving the redirect once, up front, fixes both at the source.
+        val resolvedUrl = resolveRedirect(job.url)
+
         val tmpDir = File(cacheDir, "dl/${job.id}").apply { mkdirs() }
 
         try {
-            val request = YoutubeDLRequest(job.url).apply {
+            val request = YoutubeDLRequest(resolvedUrl).apply {
                 addOption("-o", File(tmpDir, "%(title).100s-%(id)s.%(ext)s").absolutePath)
                 addOption("--no-playlist")
                 if (!job.playlistItems.isNullOrBlank()) {
@@ -105,7 +118,7 @@ class DownloadService : Service() {
                 // Same reasoning as MediaProbe's applyCookies() — without this,
                 // a login-required post downloads as a logged-out request and
                 // fails even though the browser tab shows you logged in.
-                CookieExporter.exportForUrl(applicationContext, job.url)?.let { cookieFile ->
+                CookieExporter.exportForUrl(applicationContext, resolvedUrl)?.let { cookieFile ->
                     addOption("--cookies", cookieFile.absolutePath)
                 }
                 when (job.mode) {
@@ -177,6 +190,44 @@ class DownloadService : Service() {
             }
             notifyResult(job.id, success = false, job.url, msg)
         }
+    }
+
+    // Only ever follows a redirect chain that starts from a domain this app
+    // doesn't already recognize as one of the SNS's own canonical hosts — a
+    // link already on instagram.com/tiktok.com/etc. skips the network
+    // round-trip entirely. Bounded hop count and short timeouts, and any
+    // failure (offline, unexpected response, etc.) just falls back to the
+    // original URL rather than blocking the download.
+    private fun resolveRedirect(url: String): String {
+        val canonicalHosts = setOf(
+            "instagram.com", "tiktok.com", "youtube.com", "youtu.be",
+            "x.com", "twitter.com", "threads.net", "threads.com"
+        )
+        val startHost = runCatching { URL(url).host }.getOrNull()?.lowercase()
+        if (startHost == null || canonicalHosts.any { startHost == it || startHost.endsWith(".$it") }) {
+            return url
+        }
+
+        return runCatching {
+            var current = url
+            repeat(5) {
+                val connection = (URL(current).openConnection() as HttpURLConnection).apply {
+                    instanceFollowRedirects = false
+                    requestMethod = "HEAD"
+                    connectTimeout = 5000
+                    readTimeout = 5000
+                }
+                val code = connection.responseCode
+                val location = connection.getHeaderField("Location")
+                connection.disconnect()
+                if (code in 300..399 && !location.isNullOrBlank()) {
+                    current = URL(URL(current), location).toString()
+                } else {
+                    return@runCatching current
+                }
+            }
+            current
+        }.getOrDefault(url)
     }
 
     private fun buildSummaryNotification(text: String, progress: Int): Notification {
