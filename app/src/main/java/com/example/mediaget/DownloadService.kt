@@ -115,6 +115,12 @@ class DownloadService : Service() {
                 if (!job.playlistItems.isNullOrBlank()) {
                     addOption("--playlist-items", job.playlistItems)
                 }
+                // A known yt-dlp bug (github.com/yt-dlp/yt-dlp/issues/7569) makes
+                // its Instagram extractor try to resolve video formats for every
+                // item in a carousel/story, including plain photos — which have
+                // none — aborting the whole download instead of just skipping
+                // those. This is the same flag used in MediaProbe.
+                addOption("--ignore-no-formats-error")
                 // Same reasoning as MediaProbe's applyCookies() — without this,
                 // a login-required post downloads as a logged-out request and
                 // fails even though the browser tab shows you logged in.
