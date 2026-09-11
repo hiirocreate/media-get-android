@@ -126,7 +126,7 @@ class BrowserViewModel : ViewModel() {
         viewModelScope.launch {
             MediaProbe.resolveLatestPostUrl(context, site, profileUrl)
                 .onFailure { e ->
-                    _state.update { it.copy(isProbing = false, errorMessage = "最新の投稿を特定できませんでした:\n${e.message}") }
+                    _state.update { it.copy(isProbing = false, errorMessage = "最新の投稿を特定できませんでした:\n${friendlyProbeError(e.message)}") }
                 }
                 .onSuccess { postUrl ->
                     probeAndPresent(context, postUrl, "最新の投稿のダウンロードを開始しました")
@@ -151,7 +151,7 @@ class BrowserViewModel : ViewModel() {
         viewModelScope.launch {
             MediaProbe.probeRecentPosts(context, site, profileUrl)
                 .onFailure { e ->
-                    _state.update { it.copy(isProbing = false, errorMessage = "投稿一覧を取得できませんでした:\n${e.message}") }
+                    _state.update { it.copy(isProbing = false, errorMessage = "投稿一覧を取得できませんでした:\n${friendlyProbeError(e.message)}") }
                 }
                 .onSuccess { candidates ->
                     _state.update {
@@ -201,7 +201,7 @@ class BrowserViewModel : ViewModel() {
     private suspend fun probeAndPresent(context: Context, url: String, successMessage: String) {
         when (val result = MediaProbe.probe(context, url)) {
             is ProbeResult.Failure -> {
-                _state.update { it.copy(isProbing = false, errorMessage = "内容を確認できませんでした:\n${result.message}") }
+                _state.update { it.copy(isProbing = false, errorMessage = "内容を確認できませんでした:\n${friendlyProbeError(result.message)}") }
             }
             is ProbeResult.Success -> {
                 if (result.entries.size <= 1) {
@@ -256,5 +256,29 @@ class BrowserViewModel : ViewModel() {
         DownloadActions.submit(context, s.pickerSourceUrl, playlistItems = playlistItems)
         Toast.makeText(context, "ダウンロードを開始しました（${s.pickerSelected.size}件）", Toast.LENGTH_SHORT).show()
         dismissPicker()
+    }
+
+    /**
+     * Two specific yt-dlp failure signatures here — Instagram's "user"
+     * (profile-listing) extractor returning "Unable to extract data", and
+     * TikTok's anti-bot "impersonation"/"rehydration" errors — are confirmed,
+     * long-standing, platform-side limitations (both have years of open
+     * reports on yt-dlp's own issue tracker), not something this app's code
+     * is getting wrong. Prepending a plain-language note keeps the raw
+     * message underneath (still worth relaying if reporting a problem) but
+     * stops it from reading like MediaGet itself failed to do something.
+     */
+    private fun friendlyProbeError(raw: String?): String {
+        val text = raw.orEmpty()
+        val note = when {
+            text.contains("instagram:user") && text.contains("Unable to extract data") ->
+                "Instagram側が投稿一覧の取得を制限している可能性が高いです（yt-dlp側の既知の問題）。" +
+                    "個別の投稿を開いて「この投稿を保存」を使う方法は影響を受けません。\n\n詳細:\n"
+            text.contains("impersonation") || text.contains("rehydration") ->
+                "TikTok側のボット対策が原因の可能性が高いです（yt-dlp側の既知の制限）。" +
+                    "個別の投稿を開いて「この投稿を保存」を使う方法は影響を受けません。\n\n詳細:\n"
+            else -> ""
+        }
+        return note + text
     }
 }
