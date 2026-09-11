@@ -68,6 +68,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import org.json.JSONArray
+import org.json.JSONTokener
 
 /**
  * A stock modern-Chrome-on-Android UA string. Sites use the UA to detect
@@ -172,6 +174,64 @@ private fun isProfileUrl(site: SnsSite, url: String): Boolean {
             m != null && m.groupValues[2].lowercase() !in reserved
         }
         SnsSite.THREADS -> Regex("""^https?://(www\.)?threads\.(net|com)/@[\w.\-]+$""").matches(path)
+    }
+}
+
+/**
+ * JavaScript run inside the WebView to read post links straight out of an
+ * Instagram profile grid that's already loaded and already logged in —
+ * this is the fix for yt-dlp's own `instagram:user` listing extractor,
+ * which has a long-standing upstream bug ("Unable to extract data") that
+ * fails on effectively every account (see the comment on
+ * [BrowserViewModel.presentScrapedRecentPosts]).
+ *
+ * Deliberately narrow, to stay inside the same "never enumerate more than
+ * a small fixed number of posts" boundary as [MediaProbe.probeRecentPosts]:
+ * it only reads `<a>` tags already present in the DOM right now — it never
+ * calls scroll(), never waits, and never triggers any additional network
+ * request to fetch more posts than what's already rendered on screen. If
+ * the account has fewer posts on-screen than [limit], this simply returns
+ * fewer; it never scrolls to find more. [limit] should always be passed as
+ * [MediaProbe.RECENT_POSTS_LIMIT] — nothing about this function raises
+ * that cap on its own.
+ */
+private fun instagramRecentPostsJs(limit: Int): String = """
+(function() {
+  try {
+    var anchors = document.querySelectorAll('a[href*="/p/"], a[href*="/reel/"], a[href*="/tv/"]');
+    var seen = {};
+    var results = [];
+    for (var i = 0; i < anchors.length && results.length < $limit; i++) {
+      var href = anchors[i].getAttribute('href');
+      if (!href) continue;
+      var absolute = new URL(href, location.href).href;
+      if (seen[absolute]) continue;
+      seen[absolute] = true;
+      results.push(absolute);
+    }
+    return JSON.stringify(results);
+  } catch (e) {
+    return JSON.stringify([]);
+  }
+})();
+"""
+
+/**
+ * Unwraps the value [WebView.evaluateJavascript] hands back to its
+ * callback. That callback receives the script's return value encoded as a
+ * JSON *string literal* wrapping the JS's own `JSON.stringify()` output
+ * (so a JS array comes back double-encoded) — this undoes both layers and
+ * returns an empty list rather than throwing on anything unexpected (a
+ * null callback value, a page that blocked the script, etc.).
+ */
+private fun parseJsStringArray(raw: String?): List<String> {
+    if (raw.isNullOrBlank() || raw == "null") return emptyList()
+    return try {
+        val inner = JSONTokener(raw).nextValue() as String
+        val arr = JSONArray(inner)
+        (0 until arr.length()).mapNotNull { arr.optString(it).takeIf { s -> s.isNotBlank() } }
+    } catch (e: Exception) {
+        emptyList()
     }
 }
 
@@ -468,7 +528,23 @@ fun BrowserScreen(viewModel: BrowserViewModel) {
                         // Two bounded options — the single newest post, or a hand-pick
                         // from just the newest few — never a "get everything" button.
                         Button(
-                            onClick = { viewModel.requestRecentPosts(context) },
+                            onClick = {
+                                // Instagram's yt-dlp-based listing (used for every
+                                // other site) has a long-standing upstream bug that
+                                // fails on effectively every account — see the
+                                // comment on presentScrapedRecentPosts(). Reading the
+                                // post links straight out of the already-loaded,
+                                // already-logged-in profile grid sidesteps that
+                                // entirely for this one site.
+                                if (site == SnsSite.INSTAGRAM) {
+                                    viewModel.beginProbing()
+                                    webViewRef?.evaluateJavascript(instagramRecentPostsJs(MediaProbe.RECENT_POSTS_LIMIT)) { raw ->
+                                        viewModel.presentScrapedRecentPosts(parseJsStringArray(raw))
+                                    }
+                                } else {
+                                    viewModel.requestRecentPosts(context)
+                                }
+                            },
                             modifier = Modifier.weight(1f).fillMaxHeight(),
                             contentPadding = PaddingValues(horizontal = 6.dp),
                             colors = ButtonDefaults.buttonColors()
