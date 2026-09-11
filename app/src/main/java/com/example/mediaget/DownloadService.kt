@@ -109,42 +109,22 @@ class DownloadService : Service() {
         val tmpDir = File(cacheDir, "dl/${job.id}").apply { mkdirs() }
 
         try {
-            val request = YoutubeDLRequest(resolvedUrl).apply {
-                addOption("-o", File(tmpDir, "%(title).100s-%(id)s.%(ext)s").absolutePath)
-                addOption("--no-playlist")
-                if (!job.playlistItems.isNullOrBlank()) {
-                    addOption("--playlist-items", job.playlistItems)
-                }
-                // A known yt-dlp bug (github.com/yt-dlp/yt-dlp/issues/7569) makes
-                // its Instagram extractor try to resolve video formats for every
-                // item in a carousel/story, including plain photos — which have
-                // none — aborting the whole download instead of just skipping
-                // those. This is the same flag used in MediaProbe.
-                addOption("--ignore-no-formats-error")
-                // Same reasoning as MediaProbe's applyCookies() — without this,
-                // a login-required post downloads as a logged-out request and
-                // fails even though the browser tab shows you logged in.
-                CookieExporter.exportForUrl(applicationContext, resolvedUrl)?.let { cookieFile ->
-                    addOption("--cookies", cookieFile.absolutePath)
-                }
-                when (job.mode) {
-                    DownloadMode.AUTO -> { /* let yt-dlp pick the best match for the link */ }
-                    DownloadMode.VIDEO -> {
-                        addOption("-f", "bv*+ba/best")
-                        addOption("--merge-output-format", "mp4")
-                    }
-                    DownloadMode.AUDIO_ONLY -> {
-                        addOption("-x")
-                        addOption("--audio-format", "mp3")
-                        addOption("--audio-quality", "0")
-                    }
-                }
-            }
-
-            YoutubeDL.getInstance().execute(request, job.processId) { progress, _, _ ->
-                val clamped = progress.coerceIn(0f, 100f)
-                DownloadRepository.update(job.id) { it.copy(progressPercent = clamped) }
-                updateSummaryNotification(job.url, clamped.toInt())
+            try {
+                executeYoutubeDl(job, resolvedUrl, tmpDir, forceIpv4 = false)
+            } catch (e: YoutubeDLException) {
+                // Mobile networks (especially carrier IPv6/VoLTE) sometimes hand
+                // out an IPv6-only DNS answer that yt-dlp's bundled Python
+                // networking can't resolve, even though the same host works
+                // fine in a normal browser (Android's own resolver falls back
+                // to IPv4 automatically; Python's doesn't here) — surfacing as
+                // "No address associated with hostname". This is a known,
+                // recurring issue for apps built on the same youtubedl-android
+                // library (see JunkFood02/Seal's own issue tracker), not
+                // something specific to a given site — worth one retry forcing
+                // IPv4 rather than failing outright.
+                if (e.message?.contains("No address associated with hostname") != true) throw e
+                tmpDir.listFiles()?.forEach { it.delete() }
+                executeYoutubeDl(job, resolvedUrl, tmpDir, forceIpv4 = true)
             }
 
             DownloadRepository.update(job.id) { it.copy(status = DownloadStatus.SAVING) }
@@ -195,6 +175,47 @@ class DownloadService : Service() {
                 it.copy(status = DownloadStatus.FAILED, errorMessage = msg)
             }
             notifyResult(job.id, success = false, job.url, msg)
+        }
+    }
+
+    private fun executeYoutubeDl(job: Job, resolvedUrl: String, tmpDir: File, forceIpv4: Boolean) {
+        val request = YoutubeDLRequest(resolvedUrl).apply {
+            addOption("-o", File(tmpDir, "%(title).100s-%(id)s.%(ext)s").absolutePath)
+            addOption("--no-playlist")
+            if (!job.playlistItems.isNullOrBlank()) {
+                addOption("--playlist-items", job.playlistItems)
+            }
+            // A known yt-dlp bug (github.com/yt-dlp/yt-dlp/issues/7569) makes
+            // its Instagram extractor try to resolve video formats for every
+            // item in a carousel/story, including plain photos — which have
+            // none — aborting the whole download instead of just skipping
+            // those. This is the same flag used in MediaProbe.
+            addOption("--ignore-no-formats-error")
+            if (forceIpv4) addOption("--force-ipv4")
+            // Same reasoning as MediaProbe's applyCookies() — without this,
+            // a login-required post downloads as a logged-out request and
+            // fails even though the browser tab shows you logged in.
+            CookieExporter.exportForUrl(applicationContext, resolvedUrl)?.let { cookieFile ->
+                addOption("--cookies", cookieFile.absolutePath)
+            }
+            when (job.mode) {
+                DownloadMode.AUTO -> { /* let yt-dlp pick the best match for the link */ }
+                DownloadMode.VIDEO -> {
+                    addOption("-f", "bv*+ba/best")
+                    addOption("--merge-output-format", "mp4")
+                }
+                DownloadMode.AUDIO_ONLY -> {
+                    addOption("-x")
+                    addOption("--audio-format", "mp3")
+                    addOption("--audio-quality", "0")
+                }
+            }
+        }
+
+        YoutubeDL.getInstance().execute(request, job.processId) { progress, _, _ ->
+            val clamped = progress.coerceIn(0f, 100f)
+            DownloadRepository.update(job.id) { it.copy(progressPercent = clamped) }
+            updateSummaryNotification(job.url, clamped.toInt())
         }
     }
 
