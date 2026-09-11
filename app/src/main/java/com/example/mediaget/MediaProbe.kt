@@ -31,23 +31,25 @@ object MediaProbe {
 
     suspend fun probe(context: Context, url: String): ProbeResult = withContext(Dispatchers.IO) {
         try {
-            val request = YoutubeDLRequest(url).apply {
-                addOption("--dump-single-json")
-                addOption("--flat-playlist")
-                addOption("--skip-download")
-                addOption("--no-warnings")
-                addOption("--no-playlist")
-                // A known yt-dlp bug (github.com/yt-dlp/yt-dlp/issues/7569) makes
-                // its Instagram extractor try to resolve *video* formats for
-                // every item in a carousel/story, including plain photos —
-                // which have none, so it errors the whole thing out with
-                // "No video formats found!" instead of just reporting them as
-                // photos. This tells yt-dlp to report such items instead of
-                // aborting on them.
-                addOption("--ignore-no-formats-error")
-                applyCookies(context, url)
+            val response = executeWithIpv4Fallback { forceIpv4 ->
+                YoutubeDLRequest(url).apply {
+                    addOption("--dump-single-json")
+                    addOption("--flat-playlist")
+                    addOption("--skip-download")
+                    addOption("--no-warnings")
+                    addOption("--no-playlist")
+                    // A known yt-dlp bug (github.com/yt-dlp/yt-dlp/issues/7569) makes
+                    // its Instagram extractor try to resolve *video* formats for
+                    // every item in a carousel/story, including plain photos —
+                    // which have none, so it errors the whole thing out with
+                    // "No video formats found!" instead of just reporting them as
+                    // photos. This tells yt-dlp to report such items instead of
+                    // aborting on them.
+                    addOption("--ignore-no-formats-error")
+                    if (forceIpv4) addOption("--force-ipv4")
+                    applyCookies(context, url)
+                }
             }
-            val response = YoutubeDL.getInstance().execute(request)
             val root = JSONObject(response.out.trim().lineSequence().lastOrNull { it.isNotBlank() } ?: response.out)
 
             val entries = mutableListOf<MediaEntry>()
@@ -86,17 +88,19 @@ object MediaProbe {
     suspend fun resolveLatestPostUrl(context: Context, site: SnsSite, profileUrl: String): Result<String> =
         withContext(Dispatchers.IO) {
             try {
-                val request = YoutubeDLRequest(profileUrl).apply {
-                    addOption("--dump-single-json")
-                    addOption("--flat-playlist")
-                    addOption("--skip-download")
-                    addOption("--no-warnings")
-                    addOption("--playlist-items", "1")
-                    // See the comment on this flag in probe() above.
-                    addOption("--ignore-no-formats-error")
-                    applyCookies(context, profileUrl)
+                val response = executeWithIpv4Fallback { forceIpv4 ->
+                    YoutubeDLRequest(profileUrl).apply {
+                        addOption("--dump-single-json")
+                        addOption("--flat-playlist")
+                        addOption("--skip-download")
+                        addOption("--no-warnings")
+                        addOption("--playlist-items", "1")
+                        // See the comment on this flag in probe() above.
+                        addOption("--ignore-no-formats-error")
+                        if (forceIpv4) addOption("--force-ipv4")
+                        applyCookies(context, profileUrl)
+                    }
                 }
-                val response = YoutubeDL.getInstance().execute(request)
                 val root = JSONObject(response.out.trim().lineSequence().lastOrNull { it.isNotBlank() } ?: response.out)
 
                 val firstEntry: JSONObject? = if (root.has("entries")) {
@@ -132,17 +136,19 @@ object MediaProbe {
     suspend fun probeRecentPosts(context: Context, site: SnsSite, profileUrl: String): Result<List<ProfilePostCandidate>> =
         withContext(Dispatchers.IO) {
             try {
-                val request = YoutubeDLRequest(profileUrl).apply {
-                    addOption("--dump-single-json")
-                    addOption("--flat-playlist")
-                    addOption("--skip-download")
-                    addOption("--no-warnings")
-                    addOption("--playlist-items", "1-$RECENT_POSTS_LIMIT")
-                    // See the comment on this flag in probe() above.
-                    addOption("--ignore-no-formats-error")
-                    applyCookies(context, profileUrl)
+                val response = executeWithIpv4Fallback { forceIpv4 ->
+                    YoutubeDLRequest(profileUrl).apply {
+                        addOption("--dump-single-json")
+                        addOption("--flat-playlist")
+                        addOption("--skip-download")
+                        addOption("--no-warnings")
+                        addOption("--playlist-items", "1-$RECENT_POSTS_LIMIT")
+                        // See the comment on this flag in probe() above.
+                        addOption("--ignore-no-formats-error")
+                        if (forceIpv4) addOption("--force-ipv4")
+                        applyCookies(context, profileUrl)
+                    }
                 }
-                val response = YoutubeDL.getInstance().execute(request)
                 val root = JSONObject(response.out.trim().lineSequence().lastOrNull { it.isNotBlank() } ?: response.out)
 
                 val rawEntries: List<JSONObject> = if (root.has("entries")) {
@@ -172,6 +178,27 @@ object MediaProbe {
                 }
             } catch (e: Exception) {
                 Result.failure(e)
+            }
+        }
+
+    // Mobile networks (especially carrier IPv6/VoLTE) sometimes hand out an
+    // IPv6-only DNS answer that yt-dlp's bundled Python networking can't
+    // resolve, even though the same host works fine in a normal browser
+    // (Android's own resolver falls back to IPv4 automatically; Python's
+    // doesn't here) — surfacing as "No address associated with hostname".
+    // This is a known, recurring issue for apps built on the same
+    // youtubedl-android library (see JunkFood02/Seal's own issue tracker),
+    // not something specific to a given site — worth one retry forcing IPv4
+    // rather than failing outright. `build` re-creates the request each try
+    // since a YoutubeDLRequest's options can't be removed once added.
+    private fun executeWithIpv4Fallback(build: (forceIpv4: Boolean) -> YoutubeDLRequest) =
+        try {
+            YoutubeDL.getInstance().execute(build(false))
+        } catch (e: Exception) {
+            if (e.message?.contains("No address associated with hostname") == true) {
+                YoutubeDL.getInstance().execute(build(true))
+            } else {
+                throw e
             }
         }
 
