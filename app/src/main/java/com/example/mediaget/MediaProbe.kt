@@ -37,7 +37,6 @@ object MediaProbe {
                     addOption("--flat-playlist")
                     addOption("--skip-download")
                     addOption("--no-warnings")
-                    addOption("--no-playlist")
                     // A known yt-dlp bug (github.com/yt-dlp/yt-dlp/issues/7569) makes
                     // its Instagram extractor try to resolve *video* formats for
                     // every item in a carousel/story, including plain photos —
@@ -94,7 +93,7 @@ object MediaProbe {
                         addOption("--flat-playlist")
                         addOption("--skip-download")
                         addOption("--no-warnings")
-                        addOption("--playlist-items", "1")
+                        addOption("--playlist-items", "9999")
                         // See the comment on this flag in probe() above.
                         addOption("--ignore-no-formats-error")
                         if (forceIpv4) addOption("--force-ipv4")
