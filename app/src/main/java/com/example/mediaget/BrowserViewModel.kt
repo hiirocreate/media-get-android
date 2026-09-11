@@ -165,6 +165,48 @@ class BrowserViewModel : ViewModel() {
         }
     }
 
+    /** Shows the spinner on the "直近N件" / "最新の投稿" buttons while BrowserScreen works. */
+    fun beginProbing() {
+        _state.update { it.copy(isProbing = true) }
+    }
+
+    /**
+     * Instagram-only alternate path for the "直近N件" list. yt-dlp's
+     * `instagram:user` extractor — what [requestRecentPosts] normally uses to
+     * list an account — has a long-standing, still-open upstream bug
+     * ("Unable to extract data") that fails on effectively every account, not
+     * just this app (yt-dlp issues #4394, #4953, #8013, #13626 and more, over
+     * several years). Instead of asking yt-dlp to list the account, this is
+     * fed post links BrowserScreen read directly out of the profile grid
+     * already rendered — and already logged into — in the WebView: the same
+     * links a person would tap by hand. [urls] is whatever the page-reading
+     * JS found, already capped to [MediaProbe.RECENT_POSTS_LIMIT] there — this
+     * only re-applies that same cap, never widens it. Downloading each chosen
+     * post afterward still goes through the normal, reliably-working
+     * single-post path, same as [confirmRecentPostsDownload].
+     */
+    fun presentScrapedRecentPosts(urls: List<String>) {
+        val capped = urls.take(MediaProbe.RECENT_POSTS_LIMIT)
+        if (capped.isEmpty()) {
+            _state.update {
+                it.copy(
+                    isProbing = false,
+                    errorMessage = "投稿が見つかりませんでした。プロフィール画面が読み込み中の可能性があるので、" +
+                        "投稿の並びが表示されてから、もう一度お試しください。"
+                )
+            }
+            return
+        }
+        val candidates = capped.mapIndexed { i, url -> ProfilePostCandidate(index = i + 1, title = "投稿 ${i + 1}", postUrl = url) }
+        _state.update {
+            it.copy(
+                isProbing = false,
+                recentPosts = candidates,
+                recentPostsSelected = candidates.map { c -> c.index }.toSet()
+            )
+        }
+    }
+
     fun toggleRecentPostSelected(index: Int) {
         _state.update { s ->
             val newSet = if (index in s.recentPostsSelected) s.recentPostsSelected - index else s.recentPostsSelected + index
