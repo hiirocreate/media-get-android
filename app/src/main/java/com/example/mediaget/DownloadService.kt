@@ -181,7 +181,6 @@ class DownloadService : Service() {
     private fun executeYoutubeDl(job: Job, resolvedUrl: String, tmpDir: File, forceIpv4: Boolean) {
         val request = YoutubeDLRequest(resolvedUrl).apply {
             addOption("-o", File(tmpDir, "%(title).100s-%(id)s.%(ext)s").absolutePath)
-            addOption("--no-playlist")
             if (!job.playlistItems.isNullOrBlank()) {
                 addOption("--playlist-items", job.playlistItems)
             }
