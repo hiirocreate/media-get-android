@@ -110,7 +110,7 @@ class DownloadService : Service() {
 
         try {
             try {
-                executeYoutubeDl(job, resolvedUrl, tmpDir, forceIpv4 = false)
+                executeYoutubeDl(job, resolvedUrl, tmpDir, forceIpv4 = false, writeThumbnail = false)
             } catch (e: YoutubeDLException) {
                 // Mobile networks (especially carrier IPv6/VoLTE) sometimes hand
                 // out an IPv6-only DNS answer that yt-dlp's bundled Python
@@ -124,14 +124,35 @@ class DownloadService : Service() {
                 // IPv4 rather than failing outright.
                 if (e.message?.contains("No address associated with hostname") != true) throw e
                 tmpDir.listFiles()?.forEach { it.delete() }
-                executeYoutubeDl(job, resolvedUrl, tmpDir, forceIpv4 = true)
+                executeYoutubeDl(job, resolvedUrl, tmpDir, forceIpv4 = true, writeThumbnail = false)
             }
 
             DownloadRepository.update(job.id) { it.copy(status = DownloadStatus.SAVING) }
 
-            val producedFiles = tmpDir.listFiles()?.filter { file ->
-                file.isFile && file.extension.lowercase() !in setOf("part", "ytdl", "tmp")
-            } ?: emptyList()
+            var producedFiles = tmpDir.listFiles()?.filter { isFinishedMediaFile(it) } ?: emptyList()
+
+            // A plain photo item in an Instagram carousel/story has no video
+            // formats at all — a confirmed, still-open yt-dlp bug (issues
+            // #7569 and #12439). --ignore-no-formats-error above stops that
+            // from throwing "No video formats found!" and aborting the job,
+            // but yt-dlp still downloads nothing for a photo unless told to
+            // also fetch the image — which is the maintainers' own documented
+            // workaround: --write-thumbnail. This is only ever tried as a
+            // fallback, and only when the normal attempt produced literally
+            // no file AND the user didn't explicitly ask for "動画のみ"/
+            // "音声のみ" (if they asked for video/audio specifically and this
+            // post has none, reporting that honestly is correct — silently
+            // handing back an unrelated photo would not be). A real video
+            // download always succeeds on the first attempt above, so this
+            // never runs for one and never adds an extra unwanted image file
+            // alongside a video.
+            if (producedFiles.isEmpty() && job.mode == DownloadMode.AUTO) {
+                tmpDir.listFiles()?.forEach { it.delete() }
+                runCatching {
+                    executeYoutubeDl(job, resolvedUrl, tmpDir, forceIpv4 = false, writeThumbnail = true)
+                }
+                producedFiles = tmpDir.listFiles()?.filter { isFinishedMediaFile(it) } ?: emptyList()
+            }
 
             val savedUris = producedFiles.mapNotNull { original ->
                 val finalFile = if (job.compressImages && ImageUtils.isImage(original)) {
@@ -178,9 +199,16 @@ class DownloadService : Service() {
         }
     }
 
-    private fun executeYoutubeDl(job: Job, resolvedUrl: String, tmpDir: File, forceIpv4: Boolean) {
+    private fun executeYoutubeDl(
+        job: Job,
+        resolvedUrl: String,
+        tmpDir: File,
+        forceIpv4: Boolean,
+        writeThumbnail: Boolean
+    ) {
         val request = YoutubeDLRequest(resolvedUrl).apply {
             addOption("-o", File(tmpDir, "%(title).100s-%(id)s.%(ext)s").absolutePath)
+            addOption("--no-playlist")
             if (!job.playlistItems.isNullOrBlank()) {
                 addOption("--playlist-items", job.playlistItems)
             }
@@ -190,6 +218,10 @@ class DownloadService : Service() {
             // none — aborting the whole download instead of just skipping
             // those. This is the same flag used in MediaProbe.
             addOption("--ignore-no-formats-error")
+            // See the big comment at this function's call site in processJob:
+            // only set on the one-time fallback retry for a photo item that
+            // has no video formats, so it can still hand back the image.
+            if (writeThumbnail) addOption("--write-thumbnail")
             if (forceIpv4) addOption("--force-ipv4")
             // Same reasoning as MediaProbe's applyCookies() — without this,
             // a login-required post downloads as a logged-out request and
@@ -217,6 +249,12 @@ class DownloadService : Service() {
             updateSummaryNotification(job.url, clamped.toInt())
         }
     }
+
+    // yt-dlp leaves partial/temp files behind under names like "*.part" or
+    // "*.ytdl" while a download is in progress or if it was interrupted —
+    // these are never something to save.
+    private fun isFinishedMediaFile(file: File): Boolean =
+        file.isFile && file.extension.lowercase() !in setOf("part", "ytdl", "tmp")
 
     // Only ever follows a redirect chain that starts from a domain this app
     // doesn't already recognize as one of the SNS's own canonical hosts — a
