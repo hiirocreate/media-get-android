@@ -17,7 +17,9 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.launch
+import org.json.JSONObject
 import java.io.File
+import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URL
 import java.util.concurrent.atomic.AtomicInteger
@@ -35,7 +37,8 @@ class DownloadService : Service() {
         val mode: DownloadMode,
         val compressImages: Boolean,
         val processId: String,
-        val playlistItems: String?
+        val playlistItems: String?,
+        val directSource: DirectVideoSource?
     )
 
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
@@ -60,11 +63,21 @@ class DownloadService : Service() {
         val processId = intent?.getStringExtra(EXTRA_PROCESS_ID)
         val compress = intent?.getBooleanExtra(EXTRA_COMPRESS, false) ?: false
         val playlistItems = intent?.getStringExtra(EXTRA_PLAYLIST_ITEMS)
+        val directVideoUrl = intent?.getStringExtra(EXTRA_DIRECT_VIDEO_URL)
+        val directSource = if (directVideoUrl != null) {
+            val headers = runCatching {
+                val obj = JSONObject(intent.getStringExtra(EXTRA_DIRECT_HEADERS) ?: "{}")
+                obj.keys().asSequence().associateWith { obj.getString(it) }
+            }.getOrDefault(emptyMap())
+            DirectVideoSource(directVideoUrl, headers)
+        } else {
+            null
+        }
 
         if (id != null && url != null && modeName != null && processId != null) {
             pendingCount.incrementAndGet()
             jobChannel.trySend(
-                Job(id, url, DownloadMode.valueOf(modeName), compress, processId, playlistItems)
+                Job(id, url, DownloadMode.valueOf(modeName), compress, processId, playlistItems, directSource)
             )
         }
         return START_NOT_STICKY
@@ -95,64 +108,75 @@ class DownloadService : Service() {
         DownloadRepository.update(job.id) { it.copy(status = DownloadStatus.RUNNING) }
         updateSummaryNotification(job.url, 0)
 
-        // Links coming from an SNS app's own "共有" button are very often that
-        // app's own shortened/redirect link (X's t.co, TikTok's vt./vm.tiktok.com)
-        // rather than the canonical page URL — a pasted link can be one too,
-        // since "Copy Link" on some apps hands out the same short form. That
-        // breaks two things at once: yt-dlp's per-site extractors mostly only
-        // recognize the real domain (so a bare t.co link may not match any
-        // extractor at all), and the WebView's login cookies live under the
-        // real domain too (so even a recognized short link looks logged-out).
-        // Resolving the redirect once, up front, fixes both at the source.
-        val resolvedUrl = resolveRedirect(job.url)
-
         val tmpDir = File(cacheDir, "dl/${job.id}").apply { mkdirs() }
 
         try {
-            try {
-                executeYoutubeDl(job, resolvedUrl, tmpDir, forceIpv4 = false, writeThumbnail = false)
-            } catch (e: YoutubeDLException) {
-                // Mobile networks (especially carrier IPv6/VoLTE) sometimes hand
-                // out an IPv6-only DNS answer that yt-dlp's bundled Python
-                // networking can't resolve, even though the same host works
-                // fine in a normal browser (Android's own resolver falls back
-                // to IPv4 automatically; Python's doesn't here) — surfacing as
-                // "No address associated with hostname". This is a known,
-                // recurring issue for apps built on the same youtubedl-android
-                // library (see JunkFood02/Seal's own issue tracker), not
-                // something specific to a given site — worth one retry forcing
-                // IPv4 rather than failing outright.
-                if (e.message?.contains("No address associated with hostname") != true) throw e
-                tmpDir.listFiles()?.forEach { it.delete() }
-                executeYoutubeDl(job, resolvedUrl, tmpDir, forceIpv4 = true, writeThumbnail = false)
+            val directSource = job.directSource
+            if (directSource != null) {
+                // See DirectVideoSource's doc comment: this bypasses yt-dlp
+                // entirely for a TikTok post whose video file the in-app
+                // browser already requested and played successfully.
+                downloadDirectFile(directSource, tmpDir)
+            } else {
+                // Links coming from an SNS app's own "共有" button are very
+                // often that app's own shortened/redirect link (X's t.co,
+                // TikTok's vt./vm.tiktok.com) rather than the canonical page
+                // URL — a pasted link can be one too, since "Copy Link" on
+                // some apps hands out the same short form. That breaks two
+                // things at once: yt-dlp's per-site extractors mostly only
+                // recognize the real domain (so a bare t.co link may not
+                // match any extractor at all), and the WebView's login
+                // cookies live under the real domain too (so even a
+                // recognized short link looks logged-out). Resolving the
+                // redirect once, up front, fixes both at the source.
+                val resolvedUrl = resolveRedirect(job.url)
+
+                try {
+                    executeYoutubeDl(job, resolvedUrl, tmpDir, forceIpv4 = false, writeThumbnail = false)
+                } catch (e: YoutubeDLException) {
+                    // Mobile networks (especially carrier IPv6/VoLTE) sometimes hand
+                    // out an IPv6-only DNS answer that yt-dlp's bundled Python
+                    // networking can't resolve, even though the same host works
+                    // fine in a normal browser (Android's own resolver falls back
+                    // to IPv4 automatically; Python's doesn't here) — surfacing as
+                    // "No address associated with hostname". This is a known,
+                    // recurring issue for apps built on the same youtubedl-android
+                    // library (see JunkFood02/Seal's own issue tracker), not
+                    // something specific to a given site — worth one retry forcing
+                    // IPv4 rather than failing outright.
+                    if (e.message?.contains("No address associated with hostname") != true) throw e
+                    tmpDir.listFiles()?.forEach { it.delete() }
+                    executeYoutubeDl(job, resolvedUrl, tmpDir, forceIpv4 = true, writeThumbnail = false)
+                }
+
+                val producedFilesSoFar = tmpDir.listFiles()?.filter { isFinishedMediaFile(it) } ?: emptyList()
+
+                // A plain photo item in an Instagram carousel/story has no video
+                // formats at all — a confirmed, still-open yt-dlp bug (issues
+                // #7569 and #12439). --ignore-no-formats-error above stops that
+                // from throwing "No video formats found!" and aborting the job,
+                // but yt-dlp still downloads nothing for a photo unless told to
+                // also fetch the image — which is the maintainers' own documented
+                // workaround: --write-thumbnail. This is only ever tried as a
+                // fallback, and only when the normal attempt produced literally
+                // no file AND the user didn't explicitly ask for "動画のみ"/
+                // "音声のみ" (if they asked for video/audio specifically and this
+                // post has none, reporting that honestly is correct — silently
+                // handing back an unrelated photo would not be). A real video
+                // download always succeeds on the first attempt above, so this
+                // never runs for one and never adds an extra unwanted image file
+                // alongside a video.
+                if (producedFilesSoFar.isEmpty() && job.mode == DownloadMode.AUTO) {
+                    tmpDir.listFiles()?.forEach { it.delete() }
+                    runCatching {
+                        executeYoutubeDl(job, resolvedUrl, tmpDir, forceIpv4 = false, writeThumbnail = true)
+                    }
+                }
             }
 
             DownloadRepository.update(job.id) { it.copy(status = DownloadStatus.SAVING) }
 
-            var producedFiles = tmpDir.listFiles()?.filter { isFinishedMediaFile(it) } ?: emptyList()
-
-            // A plain photo item in an Instagram carousel/story has no video
-            // formats at all — a confirmed, still-open yt-dlp bug (issues
-            // #7569 and #12439). --ignore-no-formats-error above stops that
-            // from throwing "No video formats found!" and aborting the job,
-            // but yt-dlp still downloads nothing for a photo unless told to
-            // also fetch the image — which is the maintainers' own documented
-            // workaround: --write-thumbnail. This is only ever tried as a
-            // fallback, and only when the normal attempt produced literally
-            // no file AND the user didn't explicitly ask for "動画のみ"/
-            // "音声のみ" (if they asked for video/audio specifically and this
-            // post has none, reporting that honestly is correct — silently
-            // handing back an unrelated photo would not be). A real video
-            // download always succeeds on the first attempt above, so this
-            // never runs for one and never adds an extra unwanted image file
-            // alongside a video.
-            if (producedFiles.isEmpty() && job.mode == DownloadMode.AUTO) {
-                tmpDir.listFiles()?.forEach { it.delete() }
-                runCatching {
-                    executeYoutubeDl(job, resolvedUrl, tmpDir, forceIpv4 = false, writeThumbnail = true)
-                }
-                producedFiles = tmpDir.listFiles()?.filter { isFinishedMediaFile(it) } ?: emptyList()
-            }
+            val producedFiles = tmpDir.listFiles()?.filter { isFinishedMediaFile(it) } ?: emptyList()
 
             val savedUris = producedFiles.mapNotNull { original ->
                 val finalFile = if (job.compressImages && ImageUtils.isImage(original)) {
@@ -256,6 +280,50 @@ class DownloadService : Service() {
     private fun isFinishedMediaFile(file: File): Boolean =
         file.isFile && file.extension.lowercase() !in setOf("part", "ytdl", "tmp")
 
+    /**
+     * Fetches [source]'s video URL exactly as the in-app browser's own
+     * network stack requested it — same URL, same headers (including the
+     * logged-in session's Cookie header), no yt-dlp involved. See
+     * [DirectVideoSource]'s doc comment for why: it's specifically yt-dlp's
+     * own HTTP requests that TikTok's anti-bot defenses have been blocking,
+     * not this app's access to the video itself, so replaying the exact
+     * request the WebView already made (and which already succeeded, since
+     * that's how the video played on-screen) sidesteps the problem instead
+     * of trying to out-guess it. This never contacts anything the WebView
+     * didn't already contact on its own while the user was looking at the
+     * post.
+     */
+    private fun downloadDirectFile(source: DirectVideoSource, tmpDir: File) {
+        val connection = (URL(source.videoUrl).openConnection() as HttpURLConnection).apply {
+            requestMethod = "GET"
+            connectTimeout = 15000
+            readTimeout = 30000
+            instanceFollowRedirects = true
+            source.headers.forEach { (key, value) -> setRequestProperty(key, value) }
+        }
+        try {
+            val code = connection.responseCode
+            if (code !in 200..299) {
+                throw IOException("動画の取得に失敗しました (HTTP $code)")
+            }
+            val contentType = connection.contentType.orEmpty()
+            val ext = when {
+                contentType.contains("webm") -> "webm"
+                contentType.contains("mp4") || contentType.contains("video") -> "mp4"
+                else -> {
+                    val fromUrl = source.videoUrl.substringBefore("?").substringAfterLast('.', "")
+                    if (fromUrl.length in 2..4) fromUrl else "mp4"
+                }
+            }
+            val outFile = File(tmpDir, "tiktok_${System.currentTimeMillis()}.$ext")
+            connection.inputStream.use { input ->
+                outFile.outputStream().use { output -> input.copyTo(output) }
+            }
+        } finally {
+            connection.disconnect()
+        }
+    }
+
     // Only ever follows a redirect chain that starts from a domain this app
     // doesn't already recognize as one of the SNS's own canonical hosts — a
     // link already on instagram.com/tiktok.com/etc. skips the network
@@ -335,6 +403,8 @@ class DownloadService : Service() {
         private const val EXTRA_COMPRESS = "extra_compress"
         private const val EXTRA_PROCESS_ID = "extra_process_id"
         private const val EXTRA_PLAYLIST_ITEMS = "extra_playlist_items"
+        private const val EXTRA_DIRECT_VIDEO_URL = "extra_direct_video_url"
+        private const val EXTRA_DIRECT_HEADERS = "extra_direct_headers"
 
         fun enqueue(context: Context, item: DownloadItem) {
             val intent = Intent(context, DownloadService::class.java).apply {
@@ -344,6 +414,13 @@ class DownloadService : Service() {
                 putExtra(EXTRA_COMPRESS, item.compressImages)
                 putExtra(EXTRA_PROCESS_ID, item.processId)
                 item.playlistItems?.let { putExtra(EXTRA_PLAYLIST_ITEMS, it) }
+                item.directSource?.let { source ->
+                    putExtra(EXTRA_DIRECT_VIDEO_URL, source.videoUrl)
+                    val headersJson = JSONObject().apply {
+                        source.headers.forEach { (key, value) -> put(key, value) }
+                    }
+                    putExtra(EXTRA_DIRECT_HEADERS, headersJson.toString())
+                }
             }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 context.startForegroundService(intent)

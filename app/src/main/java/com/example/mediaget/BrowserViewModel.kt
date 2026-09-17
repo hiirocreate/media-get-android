@@ -78,18 +78,54 @@ class BrowserViewModel : ViewModel() {
     // being bounced back to the SNS's home URL every time.
     var savedWebViewState: Bundle? = null
 
+    // The most recent TikTok video-file URL (+ the exact request headers the
+    // WebView used) observed on whichever page is currently open — see
+    // maybeCaptureTikTokVideoRequest() in BrowserScreen.kt and DirectVideoSource's
+    // doc comment for why this exists. capturedVideoPageUrl is what this was
+    // captured *on*; onPageUrlChanged() below clears both the moment the WebView
+    // moves to a different page, so a stale capture from a previously viewed
+    // post can never attach itself to a different page's download. Written
+    // from shouldInterceptRequest(), which WebView calls off the main thread —
+    // a plain var is good enough here since the only consequence of a lost
+    // race is falling back to the normal probe()-based path, never a wrong
+    // file being saved.
+    var capturedVideo: DirectVideoSource? = null
+        private set
+    private var capturedVideoPageUrl: String? = null
+
     fun openSite(site: SnsSite) {
         savedWebViewState = null
+        capturedVideo = null
+        capturedVideoPageUrl = null
         _state.update { it.copy(currentSite = site, currentUrl = site.homeUrl) }
     }
 
     fun goHome() {
         savedWebViewState = null
+        capturedVideo = null
+        capturedVideoPageUrl = null
         _state.update { it.copy(currentSite = null, currentUrl = "") }
     }
 
     fun onPageUrlChanged(url: String) {
+        if (url != capturedVideoPageUrl) {
+            capturedVideo = null
+            capturedVideoPageUrl = null
+        }
         _state.update { it.copy(currentUrl = url) }
+    }
+
+    /**
+     * Called from shouldInterceptRequest() in BrowserScreen.kt the moment the
+     * WebView's own network stack requests what looks like TikTok's actual
+     * video file. Only accepted when [pageUrl] still matches the page
+     * currently open, so a request left over from a page the user has since
+     * navigated away from can't get attached to whatever they open next.
+     */
+    fun recordCapturedVideo(pageUrl: String, source: DirectVideoSource) {
+        if (pageUrl != _state.value.currentUrl) return
+        capturedVideoPageUrl = pageUrl
+        capturedVideo = source
     }
 
     fun setDisplayMode(site: SnsSite, mode: DisplayMode) {
@@ -104,6 +140,21 @@ class BrowserViewModel : ViewModel() {
     fun requestDownload(context: Context) {
         val url = _state.value.currentUrl
         if (url.isBlank()) return
+
+        // TikTok's own probe/download requests are what its anti-bot defenses
+        // have been blocking (403s, "no impersonate target available") — see
+        // DirectVideoSource's doc comment. If the WebView already loaded this
+        // exact page's video successfully, use that already-succeeded request
+        // instead of asking yt-dlp to make a new one that TikTok may reject.
+        // Falls straight through to the normal path below whenever nothing
+        // was captured yet (e.g. the video hadn't started loading), so this
+        // is purely additive — never a new way for a download to fail.
+        val direct = capturedVideo
+        if (_state.value.currentSite == SnsSite.TIKTOK && direct != null && capturedVideoPageUrl == url) {
+            DownloadActions.submit(context, url, directSource = direct)
+            Toast.makeText(context, "ダウンロードを開始しました", Toast.LENGTH_SHORT).show()
+            return
+        }
 
         _state.update { it.copy(isProbing = true) }
         viewModelScope.launch { probeAndPresent(context, url, "ダウンロードを開始しました") }

@@ -14,7 +14,12 @@ object DownloadActions {
         url: String,
         mode: DownloadMode = DownloadMode.AUTO,
         compressImages: Boolean = true,
-        playlistItems: String? = null
+        playlistItems: String? = null,
+        // See DirectVideoSource's own doc comment — set only for a TikTok
+        // post whose actual video file was already observed loading in the
+        // in-app browser, so this fetches that exact file directly instead
+        // of going through yt-dlp at all.
+        directSource: DirectVideoSource? = null
     ): DownloadItem? {
         val trimmed = url.trim()
         if (trimmed.isEmpty()) return null
@@ -23,7 +28,8 @@ object DownloadActions {
             url = trimmed,
             mode = mode,
             compressImages = compressImages,
-            playlistItems = playlistItems
+            playlistItems = playlistItems,
+            directSource = directSource
         )
         DownloadRepository.add(item)
         DownloadService.enqueue(context, item)

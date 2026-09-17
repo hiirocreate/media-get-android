@@ -43,7 +43,34 @@ data class DownloadItem(
      * the user picked only some of them. Null/blank means "download everything
      * yt-dlp finds at this URL" (the normal single-item case).
      */
-    val playlistItems: String? = null
+    val playlistItems: String? = null,
+    /**
+     * When set, DownloadService fetches this URL directly instead of running
+     * yt-dlp at all. See [DirectVideoSource] for why this exists.
+     */
+    val directSource: DirectVideoSource? = null
+)
+
+/**
+ * A video file URL captured straight out of the in-app browser's own network
+ * traffic while the user had a post open — see the WebViewClient override in
+ * BrowserScreen.kt. This exists because yt-dlp's *own* HTTP requests (which
+ * don't carry a real browser's TLS/header fingerprint) are what TikTok's
+ * anti-bot defenses have been blocking — "the extractor is attempting
+ * impersonation, but no impersonate target is available" and the resulting
+ * HTTP 403s are a confirmed, still-open upstream limitation specifically on
+ * Android (impersonation there needs curl_cffi, which isn't available to
+ * youtubedl-android). The WebView's own request for the exact same file
+ * succeeds because it *is* a real browser request — so instead of asking
+ * yt-dlp to re-derive and re-request the video, this replays that same
+ * already-made request (same URL, same headers, including the logged-in
+ * session's cookies) directly. It only ever holds the one video URL the
+ * WebView already requested on the page the user is currently looking at —
+ * nothing here fetches, lists, or discovers anything beyond that.
+ */
+data class DirectVideoSource(
+    val videoUrl: String,
+    val headers: Map<String, String>
 )
 
 /** One media item detected at a URL before anything is downloaded. */

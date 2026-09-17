@@ -235,6 +235,58 @@ private fun parseJsStringArray(raw: String?): List<String> {
     }
 }
 
+/**
+ * Watches the WebView's own network requests while it plays a TikTok video,
+ * purely to notice the exact URL (and the exact headers WebView used) TikTok's
+ * own player already asked for — never to load anything extra. yt-dlp's own
+ * requests for this same file are what TikTok's anti-bot defenses have been
+ * blocking (see DirectVideoSource's doc comment); the WebView's request
+ * succeeds because it's a real browser request, so this hands that exact,
+ * already-successful request to the download step instead of yt-dlp trying
+ * (and failing) to make a fresh one of its own.
+ *
+ * TikTok's actual video-file requests share a recognizable shape: they come
+ * off a video-CDN host ("tiktokcdn"), or their path/query says as much
+ * directly ("/video/tos/", "mime_type=video_mp4"). Runs on WebView's own
+ * network thread, not the UI thread — recordCapturedVideo() on the ViewModel
+ * only ever writes a plain var, which is fine here (see its own comment).
+ */
+private fun maybeCaptureTikTokVideoRequest(
+    viewModel: BrowserViewModel,
+    request: android.webkit.WebResourceRequest
+) {
+    if (request.method?.uppercase(java.util.Locale.US) != "GET") return
+    val url = request.url
+    val host = url.host?.lowercase(java.util.Locale.US) ?: return
+    val urlString = url.toString()
+    val looksLikeVideoFile =
+        host.contains("tiktokcdn") ||
+            urlString.contains("/video/tos/") ||
+            urlString.contains("mime_type=video_mp4")
+    if (!looksLikeVideoFile) return
+
+    val pageUrl = viewModel.state.value.currentUrl
+
+    val headers = LinkedHashMap<String, String>()
+    request.requestHeaders?.forEach { (key, value) -> headers[key] = value }
+    // WebView's requestHeaders map doesn't include the Cookie header — it's
+    // handled internally by CookieManager — so pull it in separately, or the
+    // direct fetch later would go out as a logged-out request.
+    CookieManager.getInstance().getCookie(urlString)?.takeIf { it.isNotBlank() }?.let { cookie ->
+        headers["Cookie"] = cookie
+    }
+    if (headers.keys.none { it.equals("User-Agent", ignoreCase = true) }) {
+        headers["User-Agent"] = MOBILE_CHROME_USER_AGENT
+    }
+    if (headers.keys.none { it.equals("Referer", ignoreCase = true) }) {
+        // The TikTok post page itself, not the video file's own URL — this is
+        // what a real page-driven video request's Referer would be.
+        headers["Referer"] = pageUrl.ifBlank { "https://www.tiktok.com/" }
+    }
+
+    viewModel.recordCapturedVideo(pageUrl, DirectVideoSource(urlString, headers))
+}
+
 private fun drawableFor(site: SnsSite): Int = when (site) {
     SnsSite.INSTAGRAM -> R.drawable.ic_sns_instagram
     SnsSite.TIKTOK -> R.drawable.ic_sns_tiktok
@@ -458,6 +510,21 @@ fun BrowserScreen(viewModel: BrowserViewModel) {
                                     ): Boolean {
                                         val scheme = request.url.scheme?.lowercase()
                                         return scheme != "http" && scheme != "https"
+                                    }
+
+                                    // See maybeCaptureTikTokVideoRequest()'s own doc comment.
+                                    // This purely observes the WebView's own network requests
+                                    // (returning null always lets it proceed exactly as it
+                                    // otherwise would) — never blocks, rewrites, or triggers
+                                    // any request of its own.
+                                    override fun shouldInterceptRequest(
+                                        view: WebView,
+                                        request: android.webkit.WebResourceRequest
+                                    ): android.webkit.WebResourceResponse? {
+                                        if (site == SnsSite.TIKTOK) {
+                                            maybeCaptureTikTokVideoRequest(viewModel, request)
+                                        }
+                                        return super.shouldInterceptRequest(view, request)
                                     }
                                 }
                                 // Login flows (Google/Apple sign-in popups, etc.) often open
