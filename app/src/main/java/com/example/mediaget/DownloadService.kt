@@ -134,38 +134,53 @@ class DownloadService : Service() {
                 try {
                     executeYoutubeDl(job, resolvedUrl, tmpDir, forceIpv4 = false, writeThumbnail = false)
                 } catch (e: YoutubeDLException) {
-                    // Mobile networks (especially carrier IPv6/VoLTE) sometimes hand
-                    // out an IPv6-only DNS answer that yt-dlp's bundled Python
-                    // networking can't resolve, even though the same host works
-                    // fine in a normal browser (Android's own resolver falls back
-                    // to IPv4 automatically; Python's doesn't here) — surfacing as
-                    // "No address associated with hostname". This is a known,
-                    // recurring issue for apps built on the same youtubedl-android
-                    // library (see JunkFood02/Seal's own issue tracker), not
-                    // something specific to a given site — worth one retry forcing
-                    // IPv4 rather than failing outright.
-                    if (e.message?.contains("No address associated with hostname") != true) throw e
-                    tmpDir.listFiles()?.forEach { it.delete() }
-                    executeYoutubeDl(job, resolvedUrl, tmpDir, forceIpv4 = true, writeThumbnail = false)
+                    val message = e.message.orEmpty()
+                    when {
+                        // Mobile networks (especially carrier IPv6/VoLTE) sometimes hand
+                        // out an IPv6-only DNS answer that yt-dlp's bundled Python
+                        // networking can't resolve, even though the same host works
+                        // fine in a normal browser (Android's own resolver falls back
+                        // to IPv4 automatically; Python's doesn't here) — surfacing as
+                        // "No address associated with hostname". This is a known,
+                        // recurring issue for apps built on the same youtubedl-android
+                        // library (see JunkFood02/Seal's own issue tracker), not
+                        // something specific to a given site — worth one retry forcing
+                        // IPv4 rather than failing outright.
+                        message.contains("No address associated with hostname") -> {
+                            tmpDir.listFiles()?.forEach { it.delete() }
+                            executeYoutubeDl(job, resolvedUrl, tmpDir, forceIpv4 = true, writeThumbnail = false)
+                        }
+                        // A plain photo item — an Instagram carousel item, or even a
+                        // whole post that's just one photo — has no video formats at
+                        // all, a confirmed, still-open yt-dlp bug (issues #7569 and
+                        // #12439). --ignore-no-formats-error is supposed to stop this
+                        // from throwing and just skip the item instead, but in
+                        // practice it doesn't always: the download step can still
+                        // throw "No video formats found!" directly even with that flag
+                        // set. Either way, the maintainers' own documented workaround
+                        // is --write-thumbnail, which fetches the image itself instead
+                        // of a video format. Only retried when the user didn't
+                        // explicitly ask for "動画のみ"/"音声のみ" (asking for video/
+                        // audio specifically on a post with none should fail honestly,
+                        // not silently hand back an unrelated photo). A real video
+                        // download always succeeds on the first attempt, so this never
+                        // runs for one.
+                        message.contains("No video formats found") && job.mode == DownloadMode.AUTO -> {
+                            tmpDir.listFiles()?.forEach { it.delete() }
+                            executeYoutubeDl(job, resolvedUrl, tmpDir, forceIpv4 = false, writeThumbnail = true)
+                        }
+                        else -> throw e
+                    }
                 }
 
+                // Belt-and-suspenders for the same photo-format case: even when
+                // --ignore-no-formats-error *does* suppress the exception (rather
+                // than the direct-throw case handled just above), yt-dlp can still
+                // finish "successfully" having written nothing at all for a
+                // format-less photo. This independently catches that silent-empty
+                // outcome too, with the same --write-thumbnail retry and the same
+                // AUTO-only restriction.
                 val producedFilesSoFar = tmpDir.listFiles()?.filter { isFinishedMediaFile(it) } ?: emptyList()
-
-                // A plain photo item in an Instagram carousel/story has no video
-                // formats at all — a confirmed, still-open yt-dlp bug (issues
-                // #7569 and #12439). --ignore-no-formats-error above stops that
-                // from throwing "No video formats found!" and aborting the job,
-                // but yt-dlp still downloads nothing for a photo unless told to
-                // also fetch the image — which is the maintainers' own documented
-                // workaround: --write-thumbnail. This is only ever tried as a
-                // fallback, and only when the normal attempt produced literally
-                // no file AND the user didn't explicitly ask for "動画のみ"/
-                // "音声のみ" (if they asked for video/audio specifically and this
-                // post has none, reporting that honestly is correct — silently
-                // handing back an unrelated photo would not be). A real video
-                // download always succeeds on the first attempt above, so this
-                // never runs for one and never adds an extra unwanted image file
-                // alongside a video.
                 if (producedFilesSoFar.isEmpty() && job.mode == DownloadMode.AUTO) {
                     tmpDir.listFiles()?.forEach { it.delete() }
                     runCatching {
