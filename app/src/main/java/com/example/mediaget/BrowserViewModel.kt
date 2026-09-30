@@ -42,6 +42,11 @@ data class BrowserUiState(
     val pickerEntries: List<MediaEntry>? = null,
     val pickerSelected: Set<Int> = emptySet(),
     val pickerSourceUrl: String = "",
+    // Whether pickerSourceUrl is the literal page currently open in the
+    // browser (false — no benefit from HeadlessPageLoader re-visiting it) or
+    // a resolved/listed URL that was never itself actually opened (true —
+    // see probeAndPresent()). Read back by confirmPickerDownload().
+    val pickerWarmUpSession: Boolean = true,
     // "直近3件から選ぶ" — a fixed-size (see MediaProbe.RECENT_POSTS_LIMIT) list
     // of an account's newest posts to hand-pick from, never the full history.
     val recentPosts: List<ProfilePostCandidate>? = null,
@@ -151,13 +156,15 @@ class BrowserViewModel : ViewModel() {
         // is purely additive — never a new way for a download to fail.
         val direct = capturedVideo
         if (_state.value.currentSite == SnsSite.TIKTOK && direct != null && capturedVideoPageUrl == url) {
-            DownloadActions.submit(context, url, directSource = direct)
+            DownloadActions.submit(context, url, directSource = direct, warmUpSession = false)
             Toast.makeText(context, "ダウンロードを開始しました", Toast.LENGTH_SHORT).show()
             return
         }
 
         _state.update { it.copy(isProbing = true) }
-        viewModelScope.launch { probeAndPresent(context, url, "ダウンロードを開始しました") }
+        // This exact URL is what's rendered in the browser right now, already
+        // logged in — a HeadlessPageLoader re-visit would only add delay.
+        viewModelScope.launch { probeAndPresent(context, url, "ダウンロードを開始しました", warmUpSession = false) }
     }
 
     /**
@@ -180,6 +187,9 @@ class BrowserViewModel : ViewModel() {
                     _state.update { it.copy(isProbing = false, errorMessage = "最新の投稿を特定できませんでした:\n${friendlyProbeError(e.message)}") }
                 }
                 .onSuccess { postUrl ->
+                    // postUrl was only just resolved — it was never itself
+                    // actually opened in the browser — so this keeps
+                    // warmUpSession at its default (true).
                     probeAndPresent(context, postUrl, "最新の投稿のダウンロードを開始しました")
                 }
         }
@@ -286,12 +296,23 @@ class BrowserViewModel : ViewModel() {
         // Each chosen post downloads in full (same as pasting its link directly
         // into "リンクで取得") — no further per-post carousel sub-selection here,
         // to keep this already-narrow picker simple.
+        // Each candidate here is a post URL merely read off the profile page
+        // or listed by yt-dlp — never itself actually opened in the browser —
+        // so (unlike a literal "この投稿を保存" on the page you're already
+        // looking at) it still benefits from HeadlessPageLoader's warm-up
+        // visit, same as any other not-yet-opened link. Leaves warmUpSession
+        // at its default (true).
         chosen.forEach { candidate -> DownloadActions.submit(context, candidate.postUrl) }
         Toast.makeText(context, "ダウンロードを開始しました（${chosen.size}件）", Toast.LENGTH_SHORT).show()
         dismissRecentPosts()
     }
 
-    private suspend fun probeAndPresent(context: Context, url: String, successMessage: String) {
+    private suspend fun probeAndPresent(
+        context: Context,
+        url: String,
+        successMessage: String,
+        warmUpSession: Boolean = true
+    ) {
         when (val result = MediaProbe.probe(context, url)) {
             is ProbeResult.Failure -> {
                 _state.update { it.copy(isProbing = false, errorMessage = "内容を確認できませんでした:\n${friendlyProbeError(result.message)}") }
@@ -299,7 +320,7 @@ class BrowserViewModel : ViewModel() {
             is ProbeResult.Success -> {
                 if (result.entries.size <= 1) {
                     // Single item: nothing to choose from, just download it.
-                    DownloadActions.submit(context, url)
+                    DownloadActions.submit(context, url, warmUpSession = warmUpSession)
                     _state.update { it.copy(isProbing = false) }
                     Toast.makeText(context, successMessage, Toast.LENGTH_SHORT).show()
                 } else {
@@ -308,7 +329,8 @@ class BrowserViewModel : ViewModel() {
                             isProbing = false,
                             pickerEntries = result.entries,
                             pickerSelected = result.entries.map { e -> e.index }.toSet(),
-                            pickerSourceUrl = url
+                            pickerSourceUrl = url,
+                            pickerWarmUpSession = warmUpSession
                         )
                     }
                 }
@@ -346,7 +368,12 @@ class BrowserViewModel : ViewModel() {
             s.pickerSelected.sorted().joinToString(",")
         }
 
-        DownloadActions.submit(context, s.pickerSourceUrl, playlistItems = playlistItems)
+        DownloadActions.submit(
+            context,
+            s.pickerSourceUrl,
+            playlistItems = playlistItems,
+            warmUpSession = s.pickerWarmUpSession
+        )
         Toast.makeText(context, "ダウンロードを開始しました（${s.pickerSelected.size}件）", Toast.LENGTH_SHORT).show()
         dismissPicker()
     }

@@ -48,7 +48,17 @@ data class DownloadItem(
      * When set, DownloadService fetches this URL directly instead of running
      * yt-dlp at all. See [DirectVideoSource] for why this exists.
      */
-    val directSource: DirectVideoSource? = null
+    val directSource: DirectVideoSource? = null,
+    /**
+     * Whether DownloadService should visit this URL in an invisible WebView
+     * (see [HeadlessPageLoader]) before handing it to yt-dlp. True by default
+     * because most callers (the "リンクで取得" paste box, the silent share
+     * receiver) never had this URL open in the visible "ブラウザ" タブ — the
+     * browser-tab call sites in BrowserViewModel pass false instead, since
+     * for them the page is already open and already logged in right now, so
+     * a second, invisible visit would just add delay for no benefit.
+     */
+    val warmUpSession: Boolean = true
 )
 
 /**

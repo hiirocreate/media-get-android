@@ -71,49 +71,16 @@ import androidx.compose.ui.viewinterop.AndroidView
 import org.json.JSONArray
 import org.json.JSONTokener
 
-/**
- * A stock modern-Chrome-on-Android UA string. Sites use the UA to detect
- * "in-app browsers" (WebViews embedded inside other apps) and deliberately
- * cripple them — this makes MediaGet's browser present as a normal phone
- * browser instead, which is what fixes TikTok/X's blocked scrolling and
- * "open in app" nags.
- */
-private const val MOBILE_CHROME_USER_AGENT =
-    "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 " +
-        "(KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36"
-
-/**
- * Same idea as before (no "Mobile" token, so sites treat this as a tablet-
- * class touch browser rather than the phone-web experience they gate), but
- * the device name matches the actual phone this app runs on (OUKITEL C50)
- * instead of a made-up Samsung tablet model. A UA claiming a device that
- * doesn't match the real hardware is itself one more signal a site's
- * fraud/device-recognition system can use to flag "unrecognized device" —
- * this narrows that gap while keeping the non-"Mobile" trick that gets the
- * login screen to render at all.
- */
-private const val TABLET_CHROME_USER_AGENT =
-    "Mozilla/5.0 (Linux; Android 14; OUKITEL C50) AppleWebKit/537.36 " +
-        "(KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
-
-/**
- * A plain desktop-Chrome-on-Windows UA, offered as a manual option for sites
- * the user wants to browse in full PC layout. Unlike the earlier desktop-UA
- * attempt, switching to this never injects any reflow/caret-fix JavaScript —
- * that JS (not the UA itself) is what caused the scroll/white-screen bugs —
- * so this is just the UA string plus the same wide-viewport flags used for
- * tablet mode.
- */
-private const val DESKTOP_CHROME_USER_AGENT =
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
-        "(KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
+// The three Chrome UA strings this screen switches between now live in
+// UserAgents.kt, shared with HeadlessPageLoader so a headless warm-up visit
+// presents the same browser identity as this visible tab.
 
 /** Applies the chosen UA/viewport presentation to this WebView. Returns true if anything changed. */
 private fun WebView.applyDisplayMode(mode: DisplayMode): Boolean {
     val desiredUa = when (mode) {
-        DisplayMode.MOBILE -> MOBILE_CHROME_USER_AGENT
-        DisplayMode.TABLET -> TABLET_CHROME_USER_AGENT
-        DisplayMode.DESKTOP -> DESKTOP_CHROME_USER_AGENT
+        DisplayMode.MOBILE -> UserAgents.MOBILE
+        DisplayMode.TABLET -> UserAgents.TABLET
+        DisplayMode.DESKTOP -> UserAgents.DESKTOP
     }
     val changed = settings.userAgentString != desiredUa
     settings.userAgentString = desiredUa
@@ -276,7 +243,7 @@ private fun maybeCaptureTikTokVideoRequest(
         headers["Cookie"] = cookie
     }
     if (headers.keys.none { it.equals("User-Agent", ignoreCase = true) }) {
-        headers["User-Agent"] = MOBILE_CHROME_USER_AGENT
+        headers["User-Agent"] = UserAgents.MOBILE
     }
     if (headers.keys.none { it.equals("Referer", ignoreCase = true) }) {
         // The TikTok post page itself, not the video file's own URL — this is

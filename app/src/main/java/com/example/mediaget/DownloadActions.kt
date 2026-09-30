@@ -19,7 +19,11 @@ object DownloadActions {
         // post whose actual video file was already observed loading in the
         // in-app browser, so this fetches that exact file directly instead
         // of going through yt-dlp at all.
-        directSource: DirectVideoSource? = null
+        directSource: DirectVideoSource? = null,
+        // See DownloadItem.warmUpSession's own doc comment. Left at its
+        // default (true) for every caller except BrowserViewModel's
+        // browser-tab-triggered downloads, which pass false explicitly.
+        warmUpSession: Boolean = true
     ): DownloadItem? {
         val trimmed = url.trim()
         if (trimmed.isEmpty()) return null
@@ -29,7 +33,8 @@ object DownloadActions {
             mode = mode,
             compressImages = compressImages,
             playlistItems = playlistItems,
-            directSource = directSource
+            directSource = directSource,
+            warmUpSession = warmUpSession
         )
         DownloadRepository.add(item)
         DownloadService.enqueue(context, item)

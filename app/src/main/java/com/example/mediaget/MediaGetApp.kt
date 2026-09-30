@@ -32,6 +32,7 @@ class MediaGetApp : Application() {
             Log.e(TAG, "yt-dlp / ffmpeg initialization failed", e)
         }
 
+        warmUpWebViewSubsystem()
         createDownloadNotificationChannel()
 
         // The yt-dlp binary bundled inside the APK is frozen at build time and
@@ -50,6 +51,33 @@ class MediaGetApp : Application() {
             } catch (e: Exception) {
                 Log.w(TAG, "yt-dlp update check failed (will keep using the current version)", e)
             }
+        }
+    }
+
+    /**
+     * The bug this fixes: sharing a link straight to MediaGet (ShareReceiverActivity,
+     * which never opens any screen or creates a WebView) could fail with an
+     * error, while pasting the exact same link into "リンクで取得" after having
+     * opened the app normally worked fine. The difference was never the link
+     * itself — it's that CookieExporter/HeadlessPageLoader read WebView's
+     * CookieManager from DownloadService's background thread, and Android's
+     * WebView subsystem needs its *first-ever* setup in a process to happen
+     * on the main thread. When MainActivity's "ブラウザ" タブ had already
+     * created a WebView at some point, that setup was already done; when the
+     * share receiver was the very first thing to start the process, nothing
+     * had ever touched WebView yet, and the background thread trying to do
+     * that first-time setup itself is what could fail. Application.onCreate()
+     * always runs on the main thread, so doing this tiny, harmless warm-up
+     * here — regardless of which entry point (MainActivity or
+     * ShareReceiverActivity) actually started the process — makes sure it's
+     * always already done by the time any background code needs it.
+     */
+    private fun warmUpWebViewSubsystem() {
+        runCatching {
+            android.webkit.CookieManager.getInstance().setAcceptCookie(true)
+            android.webkit.WebView(this).destroy()
+        }.onFailure { e ->
+            Log.w(TAG, "WebView warm-up failed (cookie-dependent downloads may be affected)", e)
         }
     }
 

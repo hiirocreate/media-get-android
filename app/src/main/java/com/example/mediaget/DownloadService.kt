@@ -38,19 +38,21 @@ class DownloadService : Service() {
         val compressImages: Boolean,
         val processId: String,
         val playlistItems: String?,
-        val directSource: DirectVideoSource?
+        val directSource: DirectVideoSource?,
+        val warmUpSession: Boolean
     )
 
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private val jobChannel = Channel<Job>(Channel.UNLIMITED)
     private val pendingCount = AtomicInteger(0)
+    private val activeCount = AtomicInteger(0)
     private var consumerStarted = false
 
     override fun onCreate() {
         super.onCreate()
         startForeground(
             SUMMARY_NOTIFICATION_ID,
-            buildSummaryNotification("待機中", 0),
+            buildSummaryNotification("待機中"),
             ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
         )
         ensureConsumer()
@@ -73,11 +75,12 @@ class DownloadService : Service() {
         } else {
             null
         }
+        val warmUpSession = intent?.getBooleanExtra(EXTRA_WARM_UP_SESSION, true) ?: true
 
         if (id != null && url != null && modeName != null && processId != null) {
             pendingCount.incrementAndGet()
             jobChannel.trySend(
-                Job(id, url, DownloadMode.valueOf(modeName), compress, processId, playlistItems, directSource)
+                Job(id, url, DownloadMode.valueOf(modeName), compress, processId, playlistItems, directSource, warmUpSession)
             )
         }
         return START_NOT_STICKY
@@ -90,23 +93,37 @@ class DownloadService : Service() {
         scope.cancel()
     }
 
+    // Several downloads used to run one at a time no matter how many were
+    // queued — sharing a link, then sharing three more, would sit the last
+    // three behind the first until it finished. This fans the same job
+    // channel out across a handful of worker coroutines instead (a channel
+    // safely hands each job to exactly one worker, so this never processes
+    // the same job twice); capped rather than unlimited so a burst of shared
+    // links doesn't launch dozens of yt-dlp processes at once and choke the
+    // device.
     private fun ensureConsumer() {
         if (consumerStarted) return
         consumerStarted = true
-        scope.launch {
-            for (job in jobChannel) {
-                runCatching { processJob(job) }
-                if (pendingCount.decrementAndGet() <= 0) {
-                    stopForeground(STOP_FOREGROUND_REMOVE)
-                    stopSelf()
+        repeat(MAX_CONCURRENT_DOWNLOADS) {
+            scope.launch {
+                for (job in jobChannel) {
+                    activeCount.incrementAndGet()
+                    updateSummaryNotification()
+                    runCatching { processJob(job) }
+                    activeCount.decrementAndGet()
+                    if (pendingCount.decrementAndGet() <= 0) {
+                        stopForeground(STOP_FOREGROUND_REMOVE)
+                        stopSelf()
+                    } else {
+                        updateSummaryNotification()
+                    }
                 }
             }
         }
     }
 
-    private fun processJob(job: Job) {
+    private suspend fun processJob(job: Job) {
         DownloadRepository.update(job.id) { it.copy(status = DownloadStatus.RUNNING) }
-        updateSummaryNotification(job.url, 0)
 
         val tmpDir = File(cacheDir, "dl/${job.id}").apply { mkdirs() }
 
@@ -130,6 +147,19 @@ class DownloadService : Service() {
                 // recognized short link looks logged-out). Resolving the
                 // redirect once, up front, fixes both at the source.
                 val resolvedUrl = resolveRedirect(job.url)
+
+                // See HeadlessPageLoader's own doc comment. Skipped for
+                // downloads BrowserViewModel triggered on the page it's
+                // literally showing right now (job.warmUpSession == false) —
+                // only links this app never actually opened itself (shared
+                // links, pasted links, resolved/listed post URLs) get this
+                // extra, invisible visit first. Also skipped for YouTube,
+                // which this app almost never needs a login session for —
+                // no sense adding up to several seconds of delay to a plain
+                // public video link.
+                if (job.warmUpSession && !isYouTubeUrl(resolvedUrl)) {
+                    HeadlessPageLoader.warmUp(applicationContext, resolvedUrl)
+                }
 
                 try {
                     executeYoutubeDl(job, resolvedUrl, tmpDir, forceIpv4 = false, writeThumbnail = false)
@@ -285,7 +315,12 @@ class DownloadService : Service() {
         YoutubeDL.getInstance().execute(request, job.processId) { progress, _, _ ->
             val clamped = progress.coerceIn(0f, 100f)
             DownloadRepository.update(job.id) { it.copy(progressPercent = clamped) }
-            updateSummaryNotification(job.url, clamped.toInt())
+            // Per-item progress lives in DownloadRepository (the app's own
+            // download list shows it in real time); with several downloads
+            // now able to run at once, one shared status-bar notification
+            // trying to also show per-URL/per-percent text would just flicker
+            // between whichever job last reported — updateSummaryNotification()
+            // instead shows a simple, always-accurate "N件実行中" count.
         }
     }
 
@@ -294,6 +329,12 @@ class DownloadService : Service() {
     // these are never something to save.
     private fun isFinishedMediaFile(file: File): Boolean =
         file.isFile && file.extension.lowercase() !in setOf("part", "ytdl", "tmp")
+
+    private fun isYouTubeUrl(url: String): Boolean {
+        val host = runCatching { URL(url).host }.getOrNull()?.lowercase() ?: return false
+        return host == "youtube.com" || host.endsWith(".youtube.com") ||
+            host == "youtu.be" || host.endsWith(".youtu.be")
+    }
 
     /**
      * Fetches [source]'s video URL exactly as the in-app browser's own
@@ -377,19 +418,31 @@ class DownloadService : Service() {
         }.getOrDefault(url)
     }
 
-    private fun buildSummaryNotification(text: String, progress: Int): Notification {
+    private fun buildSummaryNotification(text: String): Notification {
         return NotificationCompat.Builder(this, MediaGetApp.DOWNLOAD_CHANNEL_ID)
             .setContentTitle(getString(R.string.app_name))
             .setContentText(text)
             .setSmallIcon(android.R.drawable.stat_sys_download)
             .setOngoing(true)
             .setOnlyAlertOnce(true)
-            .setProgress(100, progress, false)
             .build()
     }
 
-    private fun updateSummaryNotification(url: String, progress: Int) {
-        val notification = buildSummaryNotification("$progress% — $url", progress)
+    // Several downloads can now run at once (see ensureConsumer()), so this
+    // no longer tries to show one job's URL/percent — with more than one
+    // running, whichever job last reported would win the text and the rest
+    // would just flicker past unseen. A plain "実行中N件・待機M件" count is
+    // accurate no matter how many are running; each item's own progress bar
+    // is still visible in the app's own download list.
+    private fun updateSummaryNotification() {
+        val active = activeCount.get()
+        val waiting = (pendingCount.get() - active).coerceAtLeast(0)
+        val text = when {
+            active <= 0 -> "待機中"
+            waiting <= 0 -> "ダウンロード中（実行中 $active 件）"
+            else -> "ダウンロード中（実行中 $active 件・待機 $waiting 件）"
+        }
+        val notification = buildSummaryNotification(text)
         getSystemService(android.app.NotificationManager::class.java)
             ?.notify(SUMMARY_NOTIFICATION_ID, notification)
     }
@@ -412,6 +465,9 @@ class DownloadService : Service() {
 
     companion object {
         private const val SUMMARY_NOTIFICATION_ID = 1
+        // Bounded so a burst of several shared/queued links can't launch an
+        // unbounded pile of simultaneous yt-dlp processes on the device.
+        private const val MAX_CONCURRENT_DOWNLOADS = 3
         private const val EXTRA_ID = "extra_id"
         private const val EXTRA_URL = "extra_url"
         private const val EXTRA_MODE = "extra_mode"
@@ -420,6 +476,7 @@ class DownloadService : Service() {
         private const val EXTRA_PLAYLIST_ITEMS = "extra_playlist_items"
         private const val EXTRA_DIRECT_VIDEO_URL = "extra_direct_video_url"
         private const val EXTRA_DIRECT_HEADERS = "extra_direct_headers"
+        private const val EXTRA_WARM_UP_SESSION = "extra_warm_up_session"
 
         fun enqueue(context: Context, item: DownloadItem) {
             val intent = Intent(context, DownloadService::class.java).apply {
@@ -428,6 +485,7 @@ class DownloadService : Service() {
                 putExtra(EXTRA_MODE, item.mode.name)
                 putExtra(EXTRA_COMPRESS, item.compressImages)
                 putExtra(EXTRA_PROCESS_ID, item.processId)
+                putExtra(EXTRA_WARM_UP_SESSION, item.warmUpSession)
                 item.playlistItems?.let { putExtra(EXTRA_PLAYLIST_ITEMS, it) }
                 item.directSource?.let { source ->
                     putExtra(EXTRA_DIRECT_VIDEO_URL, source.videoUrl)
