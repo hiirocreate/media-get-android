@@ -254,6 +254,106 @@ private fun maybeCaptureTikTokVideoRequest(
     viewModel.recordCapturedVideo(pageUrl, DirectVideoSource(urlString, headers))
 }
 
+/**
+ * Instagram Stories' own alternative to the TikTok mechanism above.
+ *
+ * Unlike TikTok (blocked by anti-bot "impersonation" checks yt-dlp itself
+ * documents), Stories fail for a different, confirmed reason: yt-dlp's
+ * Stories extractor calls instagram's own `/api/v1/feed/reels_media/`
+ * endpoint, which currently returns a real HTTP 500 even with valid
+ * cookies — silently swallowed and surfaced instead as a misleading "need
+ * to log in" error (open yt-dlp issues #17755 and #17918). Cookies were
+ * never the problem, so HeadlessPageLoader/CookieExporter can't fix this;
+ * only bypassing that broken API call entirely can. This captures the
+ * story's actual video file straight off the WebView's own network
+ * traffic — the exact same already-logged-in request the Stories viewer
+ * itself just made — the same way TikTok's video capture does.
+ *
+ * Scoped to `/stories/` pages only (never the main feed/profile grid), and
+ * only ever observes requests the page already made on its own — it never
+ * triggers an extra load or advances the story itself.
+ *
+ * Unverified / experimental: Instagram's CDN URL shapes for story videos
+ * haven't been confirmed against real traffic the way TikTok's were, so
+ * this heuristic (".mp4" on a cdninstagram.com/fbcdn.net host) may need
+ * adjusting if it turns out to miss real requests or catch thumbnails too.
+ */
+private fun maybeCaptureInstagramStoryVideoRequest(
+    viewModel: BrowserViewModel,
+    request: android.webkit.WebResourceRequest
+) {
+    if (request.method?.uppercase(java.util.Locale.US) != "GET") return
+    val pageUrl = viewModel.state.value.currentUrl
+    if (!pageUrl.contains("/stories/")) return
+
+    val url = request.url
+    val host = url.host?.lowercase(java.util.Locale.US) ?: return
+    val urlString = url.toString()
+    val looksLikeVideoFile =
+        (host.contains("cdninstagram.com") || host.contains("fbcdn.net")) &&
+            urlString.contains(".mp4", ignoreCase = true)
+    if (!looksLikeVideoFile) return
+
+    val headers = LinkedHashMap<String, String>()
+    request.requestHeaders?.forEach { (key, value) -> headers[key] = value }
+    CookieManager.getInstance().getCookie(urlString)?.takeIf { it.isNotBlank() }?.let { cookie ->
+        headers["Cookie"] = cookie
+    }
+    if (headers.keys.none { it.equals("User-Agent", ignoreCase = true) }) {
+        headers["User-Agent"] = UserAgents.MOBILE
+    }
+    if (headers.keys.none { it.equals("Referer", ignoreCase = true) }) {
+        headers["Referer"] = pageUrl.ifBlank { "https://www.instagram.com/" }
+    }
+
+    viewModel.recordCapturedVideo(pageUrl, DirectVideoSource(urlString, headers))
+}
+
+/**
+ * Threads' equivalent of the above, for a different gap: yt-dlp has no
+ * merged Threads (threads.net / threads.com) video extractor at all (PR
+ * #13512 is still unmerged; issues #15086 and #7523), so a Threads video
+ * URL currently fails to resolve through yt-dlp's normal site-specific
+ * handling in any released build — not a login/cookie issue, nothing yt-dlp
+ * can presently do for this platform by itself. Threads is Meta's own
+ * product and shares Instagram's media CDN, so the same capture approach
+ * applies: watch the WebView's own traffic for the post's actual video
+ * file and fetch that exact request directly instead of asking yt-dlp to
+ * understand the page.
+ *
+ * Unverified / experimental, same caveat as the Stories capture above —
+ * not confirmed against real Threads traffic the way TikTok's pattern was.
+ */
+private fun maybeCaptureThreadsVideoRequest(
+    viewModel: BrowserViewModel,
+    request: android.webkit.WebResourceRequest
+) {
+    if (request.method?.uppercase(java.util.Locale.US) != "GET") return
+    val url = request.url
+    val host = url.host?.lowercase(java.util.Locale.US) ?: return
+    val urlString = url.toString()
+    val looksLikeVideoFile =
+        (host.contains("cdninstagram.com") || host.contains("fbcdn.net")) &&
+            urlString.contains(".mp4", ignoreCase = true)
+    if (!looksLikeVideoFile) return
+
+    val pageUrl = viewModel.state.value.currentUrl
+
+    val headers = LinkedHashMap<String, String>()
+    request.requestHeaders?.forEach { (key, value) -> headers[key] = value }
+    CookieManager.getInstance().getCookie(urlString)?.takeIf { it.isNotBlank() }?.let { cookie ->
+        headers["Cookie"] = cookie
+    }
+    if (headers.keys.none { it.equals("User-Agent", ignoreCase = true) }) {
+        headers["User-Agent"] = UserAgents.MOBILE
+    }
+    if (headers.keys.none { it.equals("Referer", ignoreCase = true) }) {
+        headers["Referer"] = pageUrl.ifBlank { "https://www.threads.com/" }
+    }
+
+    viewModel.recordCapturedVideo(pageUrl, DirectVideoSource(urlString, headers))
+}
+
 private fun drawableFor(site: SnsSite): Int = when (site) {
     SnsSite.INSTAGRAM -> R.drawable.ic_sns_instagram
     SnsSite.TIKTOK -> R.drawable.ic_sns_tiktok
@@ -479,17 +579,25 @@ fun BrowserScreen(viewModel: BrowserViewModel) {
                                         return scheme != "http" && scheme != "https"
                                     }
 
-                                    // See maybeCaptureTikTokVideoRequest()'s own doc comment.
-                                    // This purely observes the WebView's own network requests
-                                    // (returning null always lets it proceed exactly as it
-                                    // otherwise would) — never blocks, rewrites, or triggers
-                                    // any request of its own.
+                                    // See maybeCaptureTikTokVideoRequest()'s own doc comment
+                                    // (and maybeCaptureInstagramStoryVideoRequest() /
+                                    // maybeCaptureThreadsVideoRequest() for the other two
+                                    // sites below). This purely observes the WebView's own
+                                    // network requests (returning null always lets it
+                                    // proceed exactly as it otherwise would) — never blocks,
+                                    // rewrites, or triggers any request of its own.
                                     override fun shouldInterceptRequest(
                                         view: WebView,
                                         request: android.webkit.WebResourceRequest
                                     ): android.webkit.WebResourceResponse? {
-                                        if (site == SnsSite.TIKTOK) {
-                                            maybeCaptureTikTokVideoRequest(viewModel, request)
+                                        when (site) {
+                                            SnsSite.TIKTOK ->
+                                                maybeCaptureTikTokVideoRequest(viewModel, request)
+                                            SnsSite.INSTAGRAM ->
+                                                maybeCaptureInstagramStoryVideoRequest(viewModel, request)
+                                            SnsSite.THREADS ->
+                                                maybeCaptureThreadsVideoRequest(viewModel, request)
+                                            else -> {}
                                         }
                                         return super.shouldInterceptRequest(view, request)
                                     }
