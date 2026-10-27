@@ -43,9 +43,14 @@ class MediaGetApp : Application() {
         // needing a fresh APK build each time.
         appScope.launch {
             try {
+                // NIGHTLY (not STABLE): Instagram photo/carousel-image posts only
+                // download at all when yt-dlp's --write-thumbnail +
+                // --ignore-no-formats-error workaround is backed by a nightly
+                // build — the yt-dlp maintainers have said the stable channel
+                // will not reliably carry this fix (see yt-dlp issue #17133).
                 val status = YoutubeDL.getInstance().updateYoutubeDL(
                     this@MediaGetApp,
-                    YoutubeDL.UpdateChannel.STABLE
+                    YoutubeDL.UpdateChannel.NIGHTLY
                 )
                 Log.i(TAG, "yt-dlp update check: $status")
             } catch (e: Exception) {
