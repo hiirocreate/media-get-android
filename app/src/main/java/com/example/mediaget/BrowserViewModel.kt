@@ -146,16 +146,22 @@ class BrowserViewModel : ViewModel() {
         val url = _state.value.currentUrl
         if (url.isBlank()) return
 
-        // TikTok's own probe/download requests are what its anti-bot defenses
-        // have been blocking (403s, "no impersonate target available") — see
-        // DirectVideoSource's doc comment. If the WebView already loaded this
-        // exact page's video successfully, use that already-succeeded request
-        // instead of asking yt-dlp to make a new one that TikTok may reject.
-        // Falls straight through to the normal path below whenever nothing
-        // was captured yet (e.g. the video hadn't started loading), so this
-        // is purely additive — never a new way for a download to fail.
+        // Three sites now populate capturedVideo, each for its own reason —
+        // TikTok's anti-bot blocking, Instagram Stories' broken cookie-based
+        // extractor call, and Threads having no yt-dlp video extractor at
+        // all (see DirectVideoSource's doc comment and the three
+        // maybeCapture*VideoRequest() functions in BrowserScreen.kt). In
+        // every case, if the WebView already loaded this exact page's video
+        // successfully, that already-succeeded request is used directly
+        // instead of asking yt-dlp to resolve the page itself. No site check
+        // is needed here any more: capturedVideo is only ever populated by a
+        // capture function that already scoped itself to the right site/page,
+        // and recordCapturedVideo()/onPageUrlChanged() clear it the moment
+        // the page changes — so falling through to the normal probe-based
+        // path below whenever nothing was captured yet is still exactly as
+        // safe as it was when this was TikTok-only.
         val direct = capturedVideo
-        if (_state.value.currentSite == SnsSite.TIKTOK && direct != null && capturedVideoPageUrl == url) {
+        if (direct != null && capturedVideoPageUrl == url) {
             DownloadActions.submit(context, url, directSource = direct, warmUpSession = false)
             Toast.makeText(context, "ダウンロードを開始しました", Toast.LENGTH_SHORT).show()
             return
